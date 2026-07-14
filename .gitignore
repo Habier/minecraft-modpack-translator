@@ -1,0 +1,32 @@
+# Build outputs
+/bin/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+
+# Go workspace and coverage artifacts
+/go.work
+/go.work.sum
+coverage.out
+coverage.html
+
+# Local caches and temporary files
+/.cache/
+/tmp/
+*.log
+
+# Generated Minecraft output from local runs
+/resourcepacks/
+/TraduccionModpack/
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.atl/
