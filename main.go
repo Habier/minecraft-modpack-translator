@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,7 +46,15 @@ func run(args []string) error {
 }
 
 func runWithLanguageLimits(args []string, limits languageLimits) error {
-	modpackPath, err := modpackPathFromArgs(args)
+	options, err := parseCLI(args)
+	if err != nil {
+		return err
+	}
+	pathArgs := []string{}
+	if options.modpackPath != "" {
+		pathArgs = append(pathArgs, options.modpackPath)
+	}
+	modpackPath, err := modpackPathFromArgs(pathArgs)
 	if err != nil {
 		return err
 	}
@@ -113,6 +122,17 @@ func runWithLanguageLimits(args []string, limits languageLimits) error {
 
 	fmt.Printf("\nWorkspace de traducción (archivos pendientes):\n%s\n", workspacePath)
 	fmt.Printf("\nResource pack de exportación (metadatos y traducciones terminadas solamente):\n%s\n", exportPackPath)
+	if options.translate {
+		host, model, timeout, err := ollamaConfigFromEnv(os.Getenv)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("\nTranslating catalog locally with Ollama model %s\n", model)
+		if err := translateWorkspace(context.Background(), workspacePath, model, newOllamaTranslator(host, model, timeout), translationOptions{}); err != nil {
+			return err
+		}
+		fmt.Printf("Validated translations cached at:\n%s\n", translationCachePath(workspacePath, model))
+	}
 	return nil
 }
 

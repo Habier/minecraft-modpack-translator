@@ -1,11 +1,14 @@
 # Modpack Translator
 
-Modpack Translator prepares a translation workspace and a separate distributable export from modpack language sources. It reports mods that already include Spanish, writes English language files when Spanish is unavailable, and stages supported Patchouli and FTB Quests sources without changing their bytes or structure. AI-assisted translation is planned for future work and is **not implemented**.
+Modpack Translator prepares a translation workspace and a separate distributable export from modpack language sources. Extraction remains the default. An opt-in local Ollama step can translate the normalized catalog into a validated, resumable workspace cache; final JSON5/SNBT export writeback is not implemented yet.
+
+> **Using a compiled release?** Follow the [Installation and User Guide](docs/INSTALLATION.md) to download the correct binary, extract a modpack, and optionally translate locally with Ollama. You do not need Go.
 
 ## Prerequisites
 
 - Go 1.22 or newer
 - A Minecraft modpack directory containing a `mods` folder
+- Optional for local translation: [Ollama](https://ollama.com/) and the `qwen3:8b` model
 
 ## Quick Start
 
@@ -29,7 +32,37 @@ go run .
 
 When no path is provided, the tool searches the current directory first, then common Minecraft launcher locations. If it finds exactly one modpack, it uses that folder. If it finds several, it lets you choose one by number.
 
-The current command extracts pending sources only. It prepares the export resource pack, but it does not claim to produce useful translated assets until a future translation step writes real `es_es.json` files there.
+The default command extracts pending sources only. It prepares the export resource pack, but it does not claim to produce useful translated assets until a future writeback step writes real `es_es.json` files there.
+
+## Local Translation With Ollama
+
+Install Ollama, then download the default model once:
+
+```powershell
+ollama pull qwen3:8b
+```
+
+Run extraction followed by local translation:
+
+```powershell
+modpack-translator --translate "C:\path\to\your\modpack"
+modpack-translator "C:\path\to\your\modpack" --translate
+modpack-translator --translate
+```
+
+When the path is omitted, normal modpack auto-discovery still applies. The `qwen3:8b` default is a practical quality/performance target for a machine with an RTX 3070-class 8 GB GPU and 32 GB system RAM. Ollama may use both GPU and system memory depending on its configuration.
+
+| Environment variable | Default | Purpose |
+|---|---|---|
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama HTTP/HTTPS endpoint |
+| `OLLAMA_MODEL` | `qwen3:8b` | Installed local model name |
+| `OLLAMA_TIMEOUT` | `30m` | Per-request limit; use a positive Go duration such as `2h` for slow CPU translation |
+
+No API key is used. Source text is sent only to the configured Ollama endpoint, which is local by default. The tool never downloads a missing model automatically; its error tells you which `ollama pull` command to run.
+
+Validated results are published after each successful batch or recovered sub-batch under `workspace/translations/ollama/<model-safe>/translations.v1.json`. An invalid structured response is retried once, then split deterministically until valid work is salvaged. Entries that still fail alone remain uncached, are listed in `failures.v1.json`, and produce a partial-completion error only after all other work finishes. Rerunning `--translate` retries only those uncached entries; a fully successful rerun removes the stale failure report. Source, model, target locale, token signature, provider, or prompt changes invalidate the affected cache entries.
+
+Translation currently stops at this workspace cache. It does **not** create final files under `export`, because safe generic writeback for the supported JSON5 and SNBT source structures is a separate unit of work.
 
 ## Automatic Modpack Discovery
 
@@ -71,7 +104,10 @@ One run creates or prepares both output areas inside the same modpack directory:
     │       └── ftbquests/
     │           └── config/ftbquests/quests/<original-relative-path>
     │               or defaultconfigs/ftbquests/quests/<original-relative-path>
-	│   └── catalog/catalog.v1.json
+    │   ├── catalog/catalog.v1.json
+    │   └── translations/ollama/<model-safe>/
+    │       ├── translations.v1.json
+    │       └── failures.v1.json (only when entries remain pending)
     └── export/
         └── overrides/
             └── resourcepacks/
@@ -80,13 +116,13 @@ One run creates or prepares both output areas inside the same modpack directory:
                     └── assets/ (future translated files only)
 ```
 
-`workspace` is translation work state and is not distributed. Pending files mirror their source structures there, but they are never copied into `export`.
+`workspace` is translation work state and is not distributed. Pending files and validated Ollama cache entries remain there and are never copied into `export`.
 
 `workspace/catalog/catalog.v1.json` is the deterministic, versioned input for a future translation provider. It contains decoded source strings, protected-token metadata, stable source locations, and writeback metadata, but no API keys, provider requests, or translations. It is atomically replaced only after all selected sources validate; a failed build preserves the previous complete catalog.
 
 `export/overrides` follows the layout that launchers and modpack importers copy onto a modpack root. Its `resourcepacks/ModpackTranslations` directory contains `pack.mcmeta` and, in future, only real translated assets such as `assets/<namespace>/lang/es_es.json`.
 
-On every successful source extraction, the tool atomically replaces only its owned `workspace/sources` tree, removing stale extractor output while preserving `workspace/assets` and unrelated workspace data. If any optional source is malformed or unsafe, extraction fails and the previous complete `workspace/sources` tree remains in place. The tool also removes stale `es_es.pending.json` entries only from its owned export resource-pack directory before writing `pack.mcmeta`. Pending Patchouli and FTB Quests sources are never written under `export`.
+On every successful extraction, the tool replaces its tool-owned `workspace/assets` and `workspace/sources` output; do not store unrelated files there. If an optional source is malformed or unsafe, extraction fails before staged sources are published. The tool also removes stale `es_es.pending.json` entries only from its owned export resource-pack directory before writing `pack.mcmeta`. Pending Patchouli and FTB Quests sources are never written under `export`.
 
 Existing Spanish files from mods are not copied because Minecraft can already load them from the original mod JARs.
 
@@ -109,9 +145,9 @@ The source JARs are read only and are not modified.
 
 ## Translation Safety
 
-Future translation providers must pass human-readable values through the reusable `tokenprotect` package. It shields printf placeholders, brace variables, Minecraft formatting codes, line breaks, Patchouli macros, resource identifiers, and URLs with opaque deterministic markers before any text leaves the application. URLs and complete Patchouli macros take precedence over their embedded resource identifiers, so overlapping syntax is protected exactly once.
+Translation providers pass every human-readable value through the reusable `tokenprotect` package. It shields printf placeholders, brace variables, Minecraft formatting codes, line breaks, Patchouli macros, resource identifiers, and URLs with opaque deterministic markers before any text reaches Ollama. URLs and complete Patchouli macros take precedence over their embedded resource identifiers, so overlapping syntax is protected exactly once.
 
-Restoration requires every marker identity exactly once. Missing, duplicated, unknown, altered, or malformed markers are rejected instead of publishing damaged text. Providers may move independent markers and indexed printf placeholders, but unindexed printf arguments and the Patchouli macro stream retain source order because reordering those constructs can change meaning or break markup nesting. This safety layer operates on individual strings only; it does not parse JSON, JSON5, or SNBT and does not call a translation service.
+Restoration requires every marker identity exactly once. Missing, duplicated, unknown, altered, or malformed markers reject the entire batch before cache publication. Providers may move independent markers and indexed printf placeholders, but unindexed printf arguments and the Patchouli macro stream retain source order because reordering those constructs can change meaning or break markup nesting.
 
 ## Catalog Field Policy
 
@@ -213,6 +249,8 @@ Run the tests and Go static analysis from the project directory:
 ```powershell
 go test ./...
 go vet ./...
+go build ./...
+git diff --check
 ```
 
 ## Minecraft Compatibility

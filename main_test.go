@@ -5,7 +5,10 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +16,45 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestRunTranslateExtractsThenCachesWithoutExportWriteback(t *testing.T) {
+	modpack, jar := testModpack(t)
+	writeTestJar(t, jar, []zipEntry{{"assets/example/lang/en_us.json", []byte(`{"key":"Hello %s"}`)}})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		start := strings.Index(body.Messages[0].Content, `[{"id":"`)
+		if start < 0 {
+			t.Fatalf("request prompt has no items: %s", body.Messages[0].Content)
+		}
+		var items []TranslationRequest
+		if err := json.Unmarshal([]byte(body.Messages[0].Content[start:]), &items); err != nil {
+			t.Fatal(err)
+		}
+		content, _ := json.Marshal(map[string]any{"results": []TranslationResult{{ID: items[0].ID, Translated: "Hola " + strings.TrimPrefix(items[0].Source, "Hello ")}}})
+		json.NewEncoder(writer).Encode(map[string]any{"message": map[string]string{"content": string(content)}, "done": true})
+	}))
+	defer server.Close()
+	t.Setenv("OLLAMA_HOST", server.URL)
+	t.Setenv("OLLAMA_MODEL", "fake:1")
+	if err := run([]string{modpack, "--translate"}); err != nil {
+		t.Fatal(err)
+	}
+	workspace, export := outputPaths(modpack)
+	cache := readTranslationCache(t, translationCachePath(workspace, "fake:1"))
+	if len(cache.Entries) != 1 || !strings.Contains(cache.Entries[0].Translation, "%s") {
+		t.Fatalf("cache = %#v", cache)
+	}
+	if _, err := os.Stat(filepath.Join(export, "translations")); !os.IsNotExist(err) {
+		t.Fatalf("translation cache under export: %v", err)
+	}
+}
 
 type zipEntry struct {
 	name string
