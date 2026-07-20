@@ -1,6 +1,6 @@
 # Modpack Translator
 
-Modpack Translator creates a Minecraft resource pack workspace from language files found inside mod JARs. It reports mods that already include Spanish and writes English language sources to a separate pending-translation folder when Spanish is unavailable. AI-assisted translation is planned for future work and is **not implemented**.
+Modpack Translator prepares a translation workspace and a separate distributable export from modpack language sources. It reports mods that already include Spanish, writes English language files when Spanish is unavailable, and stages supported Patchouli and FTB Quests sources without changing their bytes or structure. AI-assisted translation is planned for future work and is **not implemented**.
 
 ## Prerequisites
 
@@ -29,7 +29,7 @@ go run .
 
 When no path is provided, the tool searches the current directory first, then common Minecraft launcher locations. If it finds exactly one modpack, it uses that folder. If it finds several, it lets you choose one by number.
 
-After generation, start Minecraft and enable **ModpackTranslations** in the Resource Packs menu.
+The current command extracts pending sources only. It prepares the export resource pack, but it does not claim to produce useful translated assets until a future translation step writes real `es_es.json` files there.
 
 ## Automatic Modpack Discovery
 
@@ -46,29 +46,47 @@ Some launchers store the actual Minecraft folder as `<instance>/.minecraft`, so 
 
 ## Input And Output
 
-The expected modpack layout is:
+The expected modpack layout includes a supported metadata file and a `mods` directory:
 
 ```text
 <modpack>/
+├── mmc-pack.json or manifest.json
 └── mods/
     ├── example-mod.jar
     └── another-mod.jar
 ```
 
-The command creates this resource pack inside the same modpack directory:
+One run creates or prepares both output areas inside the same modpack directory:
 
 ```text
 <modpack>/
-└── resourcepacks/
-    └── ModpackTranslations/
-        ├── pack.mcmeta
-        └── assets/
-            └── <namespace>/
-                └── lang/
-                    └── es_es.pending.json
+└── modpack-translator-output/
+    ├── workspace/
+    │   ├── assets/
+    │   │   └── <namespace>/lang/es_es.pending.json
+    │   └── sources/
+    │       ├── patchouli/
+    │       │   ├── jars/<stable-source-id>/<original-JAR-path>
+    │       │   └── instance/<book>/<original-book-relative-path>
+    │       └── ftbquests/
+    │           └── config/ftbquests/quests/<original-relative-path>
+    │               or defaultconfigs/ftbquests/quests/<original-relative-path>
+	│   └── catalog/catalog.v1.json
+    └── export/
+        └── overrides/
+            └── resourcepacks/
+                └── ModpackTranslations/
+                    ├── pack.mcmeta
+                    └── assets/ (future translated files only)
 ```
 
-Pending files mirror the normal Minecraft assets structure, but Minecraft does not load `es_es.pending.json` because it is not a valid language-code filename. Future translation steps can turn it into `es_es.json` when the content is actually translated.
+`workspace` is translation work state and is not distributed. Pending files mirror their source structures there, but they are never copied into `export`.
+
+`workspace/catalog/catalog.v1.json` is the deterministic, versioned input for a future translation provider. It contains decoded source strings, protected-token metadata, stable source locations, and writeback metadata, but no API keys, provider requests, or translations. It is atomically replaced only after all selected sources validate; a failed build preserves the previous complete catalog.
+
+`export/overrides` follows the layout that launchers and modpack importers copy onto a modpack root. Its `resourcepacks/ModpackTranslations` directory contains `pack.mcmeta` and, in future, only real translated assets such as `assets/<namespace>/lang/es_es.json`.
+
+On every successful source extraction, the tool atomically replaces only its owned `workspace/sources` tree, removing stale extractor output while preserving `workspace/assets` and unrelated workspace data. If any optional source is malformed or unsafe, extraction fails and the previous complete `workspace/sources` tree remains in place. The tool also removes stale `es_es.pending.json` entries only from its owned export resource-pack directory before writing `pack.mcmeta`. Pending Patchouli and FTB Quests sources are never written under `export`.
 
 Existing Spanish files from mods are not copied because Minecraft can already load them from the original mod JARs.
 
@@ -76,17 +94,64 @@ Only top-level `*.jar` files in `<modpack>/mods` are processed.
 
 ## Language Precedence
 
-Language selection is performed independently for each namespace in each mod JAR:
+Language selection is performed per key after merging each namespace across mod JARs:
 
-1. If `assets/<namespace>/lang/es_es.json` exists, the namespace is reported as `OK` and nothing is copied.
-2. Otherwise, if `assets/<namespace>/lang/en_us.json` exists, its bytes are copied to `assets/<namespace>/lang/es_es.pending.json`. This file is a future translation source; Minecraft does not load it.
-3. If neither file exists, that namespace is skipped.
+1. Every selected `en_us.json` is parsed and merged by key, including files beside a same-JAR `es_es.json`.
+2. Keys present in any selected `es_es.json` are removed from the merged English keys. Duplicate target keys are tolerated because only their presence matters; source keys remain unique and strict.
+3. Remaining English keys are written to `workspace/assets/<namespace>/lang/es_es.pending.json`. If no keys remain, no pending file is written.
+4. If neither language file exists, that namespace is skipped.
 
 Missing Spanish entries can still fall back through Minecraft's normal resource-pack and language fallback behavior.
 
 The current source language is fixed to `en_us` and the current target language is fixed to `es_es`. Other output languages are not accepted by the CLI yet; the language names are centralized in code so that a future flag or configuration option can be added without changing the extraction rules.
 
 The source JARs are read only and are not modified.
+
+## Translation Safety
+
+Future translation providers must pass human-readable values through the reusable `tokenprotect` package. It shields printf placeholders, brace variables, Minecraft formatting codes, line breaks, Patchouli macros, resource identifiers, and URLs with opaque deterministic markers before any text leaves the application. URLs and complete Patchouli macros take precedence over their embedded resource identifiers, so overlapping syntax is protected exactly once.
+
+Restoration requires every marker identity exactly once. Missing, duplicated, unknown, altered, or malformed markers are rejected instead of publishing damaged text. Providers may move independent markers and indexed printf placeholders, but unindexed printf arguments and the Patchouli macro stream retain source order because reordering those constructs can change meaning or break markup nesting. This safety layer operates on individual strings only; it does not parse JSON, JSON5, or SNBT and does not call a translation service.
+
+## Catalog Field Policy
+
+Standard language catalogs accept only UTF-8 root objects with unique keys and string values. Empty and Unicode-whitespace-only values are skipped; non-empty whitespace and every repeated occurrence are preserved. Language keys are locators and are never translation text.
+
+Patchouli includes `book.json` `name`, `landing_text`, and `subtitle`; category `name` and `description`; entry `name`; page string shorthand; built-in page `title` and `text`; multiblock/entity `name`; link-page `link_text`; and literal template component `text` plus string-array `tooltip`. Technical identifiers, recipes, items/entities, images, URL properties, colors, coordinates, flags, macro definitions, and `#` template expressions are excluded. Detectable i18n books do not catalog localization keys. Custom template/include variable inference is intentionally unsupported because safe dataflow across arbitrary templates is outside this slice.
+
+FTB Quests SNBT includes root `title`/`lock_message`, chapter-group `title`, chapter `title` and string-list `subtitle`, quest `title`/scalar `subtitle`/`description`, task/reward `title`, reward-table `title`, toast `description`, and chapter-image `hover`. Chapter subtitle entries retain their array index in the locator and writeback metadata; mixed or non-string subtitle lists fail the catalog transaction. For FTB 1.20.1 compatibility, catalog parsing accepts whitespace-separated compound members, adjacent compound elements in lists, adjacent quoted-string list elements, and valid typed numeric array elements when FTB omits their commas. Typed-array recovery is limited to the declared byte, int, or long grammar and range; ordinary bare and numeric lists remain strict. A bounded in-memory copy receives only separators confirmed by parser state and key lookahead; staged quest files, source hashes, locators, and writeback metadata remain based on the original bytes. Comments, bare or numeric ambiguous list separators, and malformed structure fail closed. Commands, IDs/types, item/entity/advancement/config fields, custom-name matching, URLs, the `{@pagebreak}` sentinel, and exact lowercase `{ftbquests.<key>}` localization references using letters, digits, `_`, `.`, or `-` are excluded. Human brace variables, prose containing a reference, and unrelated brace strings remain catalog text. JSON5 accepts comments, trailing commas, unquoted keys, and single quotes, but rejects duplicate members; it catalogs verified `title`, `quest_subtitle`, `quest_desc`, and `chapter_subtitle` locale tables keyed by 16-hex object IDs.
+
+Catalog limits are 64 nesting levels, 100,000 members per object/array, 100,000 entries, 64 KiB per source string, 256 MiB aggregate source text, and a 16 MiB limit for every selected source or target language ZIP entry and pending source file. Declared and actual ZIP entry sizes are checked. Limits and malformed UTF-8 fail the build rather than truncating data.
+
+## Patchouli Sources
+
+Patchouli files are copied byte for byte, then the conservative fields listed above are read into the catalog. Originals remain unchanged.
+
+From each mod JAR, the tool copies only regular `.json` files under these paths:
+
+- `assets/<namespace>/patchouli_books/<book>/en_us/categories/**`
+- `assets/<namespace>/patchouli_books/<book>/en_us/entries/**`
+- `assets/<namespace>/patchouli_books/<book>/en_us/templates/**`
+- `data/<namespace>/patchouli_books/<book>/book.json` declaration metadata
+
+JAR sources are stored below `workspace/sources/patchouli/jars/<stable-source-id>/` with their complete original JAR paths. The stable ID combines a sanitized JAR basename with a short SHA-256 content hash, so different same-basename JARs do not overwrite each other.
+
+For external books, the tool reads `<modpack>/patchouli_books/<book>/` and copies `<book>/book.json` plus regular `.json` files recursively under `<book>/en_us/categories`, `entries`, and `templates`. These files retain their book-relative structure below `workspace/sources/patchouli/instance/`.
+
+Other locales, textures, non-JSON files, and unrelated Patchouli paths are excluded. Filesystem links/reparse points and ZIP symlink entries are not followed or copied.
+
+## FTB Quests Sources
+
+The tool selects one reusable quest-definition root using this precedence:
+
+1. `<modpack>/config/ftbquests/quests` when it contains regular `data.snbt` or `data.json5`.
+2. Otherwise, `<modpack>/defaultconfigs/ftbquests/quests` when it contains either sentinel.
+
+It copies only regular `.snbt` and `.json5` files recursively, preserving the selected root and relative structure below `workspace/sources/ftbquests/`. The copies are parsed read-only to build the catalog and are never used for generic writeback.
+
+The first slice excludes `saves/**`, world-specific `world/ftbquests` progress, `world/serverconfig`, arbitrary FTB Quests TOML settings, and candidate roots without a supported sentinel. Filesystem links/reparse points are not followed or copied.
+
+All pending source extraction uses per-file, total-byte, and file-count limits. Unsafe archive paths, differing-byte destination collisions, and malformed selected sources stop source publication with a contextual error.
 
 ## Build And Run Locally
 
@@ -152,4 +217,34 @@ go vet ./...
 
 ## Minecraft Compatibility
 
-The generated `pack.mcmeta` currently uses a fixed resource pack format of `34`. Pack format compatibility depends on the Minecraft version, so verify that format `34` is suitable for the version used by your modpack. Automatic Minecraft version detection and pack-format selection are not currently implemented.
+Before creating `pack.mcmeta`, the tool detects the exact Minecraft Java release using this deterministic precedence:
+
+1. `mmc-pack.json`: the `version` of the `components` entry whose `uid` is `net.minecraft` (MultiMC, Prism Launcher, and PolyMC).
+2. `manifest.json`: `minecraft.version` (CurseForge/export format).
+
+For launcher instances whose selected game directory is `<instance>/.minecraft`, the same files are also checked in the immediate instance directory. No recursive metadata scan is performed. A malformed higher-precedence file is reported with its path and stops detection; a missing file allows the next format to be tried. If neither file provides a version, generation stops before `pack.mcmeta` is written.
+
+Only exact release strings are accepted. Snapshots, pre-releases, release candidates, modified version strings, and unknown versions are rejected rather than guessed.
+
+| Minecraft Java releases | Resource pack format |
+|---|---:|
+| 1.16.5 | 6 |
+| 1.17-1.17.1 | 7 |
+| 1.18-1.18.2 | 8 |
+| 1.19-1.19.2 | 9 |
+| 1.19.3 | 12 |
+| 1.19.4 | 13 |
+| 1.20-1.20.1 | 15 |
+| 1.20.2 | 18 |
+| 1.20.3-1.20.4 | 22 |
+| 1.20.5-1.20.6 | 32 |
+| 1.21-1.21.1 | 34 |
+| 1.21.2-1.21.3 | 42 |
+| 1.21.4 | 46 |
+| 1.21.5 | 55 |
+| 1.21.6 | 63 |
+| 1.21.7-1.21.8 | 64 |
+
+Minecraft 1.21.9 and newer use decimal resource pack formats and `min_format`/`max_format` metadata. Those versions are explicitly unsupported until that schema is implemented; the tool never emits an integer `pack_format` for them.
+
+Format values come from the Minecraft Wiki [resource pack format history](https://minecraft.wiki/w/Pack_format#Resource_pack_format_history). This is intentionally the resource-pack table, not the separate data-pack table.
