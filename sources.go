@@ -23,6 +23,7 @@ const (
 type sourceCounts struct {
 	patchouli int
 	ftbquests int
+	kubejs    int
 }
 
 type sourceExtractor struct {
@@ -234,6 +235,23 @@ func (e *sourceExtractor) extractFTBQuests(modpackPath string) error {
 			return err
 		}
 		e.counts.ftbquests++
+		return nil
+	})
+}
+
+func (e *sourceExtractor) extractKubeJSLang(modpackPath string) error {
+	root := filepath.Join(modpackPath, "kubejs", "assets")
+	return e.walkRegularFiles(root, func(relative string) bool {
+		parts := strings.Split(filepath.ToSlash(relative), "/")
+		if len(parts) != 3 || parts[0] == "" || parts[1] != "lang" || parts[2] != sourceLanguageCode+".json" {
+			return false
+		}
+		return !regularFile(filepath.Join(root, parts[0], "lang", targetLanguageCode+".json"))
+	}, func(relative string, data []byte) error {
+		if err := e.write(filepath.Join("kubejs", "assets", relative), data); err != nil {
+			return err
+		}
+		e.counts.kubejs++
 		return nil
 	})
 }

@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"modpack-translator/internal/writeback"
 )
 
 const (
@@ -60,6 +62,11 @@ func runWithLanguageLimits(args []string, limits languageLimits) error {
 	modpackPath, err := modpackPathFromArgs(pathArgs)
 	if err != nil {
 		return err
+	}
+	if options.translate {
+		if err := writeback.RemoveStaleZip(modpackPath); err != nil {
+			return err
+		}
 	}
 
 	modsPath := filepath.Join(modpackPath, "mods")
@@ -109,6 +116,9 @@ func runWithLanguageLimits(args []string, limits languageLimits) error {
 	if err := extractor.extractFTBQuests(modpackPath); err != nil {
 		return fmt.Errorf("extract FTB Quests: %w", err)
 	}
+	if err := extractor.extractKubeJSLang(modpackPath); err != nil {
+		return fmt.Errorf("extract KubeJS language files: %w", err)
+	}
 	entryCount, _, err := buildCatalog(extractor.stageWorkspace)
 	if err != nil {
 		return fmt.Errorf("build translation catalog: %w", err)
@@ -121,6 +131,7 @@ func runWithLanguageLimits(args []string, limits languageLimits) error {
 	fmt.Printf("Fuentes estándar: procesados %d JARs\n", len(jarFiles))
 	fmt.Printf("Fuentes Patchouli: %d archivos\n", extractor.counts.patchouli)
 	fmt.Printf("Fuentes FTB Quests: %d archivos\n", extractor.counts.ftbquests)
+	fmt.Printf("Fuentes KubeJS: %d archivos\n", extractor.counts.kubejs)
 	fmt.Printf("Catálogo de traducción: %d entradas\n%s\n", entryCount, catalogPath)
 
 	fmt.Printf("\nWorkspace de traducción (archivos pendientes):\n%s\n", workspacePath)
@@ -135,8 +146,15 @@ func runWithLanguageLimits(args []string, limits languageLimits) error {
 			return err
 		}
 		fmt.Printf("Validated translations cached at:\n%s\n", translationCachePath(workspacePath, model))
+		if _, err := writebackWorkspace(modpackPath); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func writebackWorkspace(modpackPath string) (string, error) {
+	return writeback.Workspace(modpackPath)
 }
 
 func outputPaths(modpackPath string) (workspacePath, exportPackPath string) {

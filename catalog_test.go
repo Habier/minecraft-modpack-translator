@@ -72,6 +72,41 @@ func TestPatchouliI18NModeExcludesLocalizationKeys(t *testing.T) {
 	}
 }
 
+func TestCatalogExtractsKubeJSLangEntries(t *testing.T) {
+	workspace := t.TempDir()
+	sourceFile := filepath.Join(workspace, "sources", "kubejs", "assets", "ftbquestlocalizer", "lang", "en_us.json")
+	writeFiles(t, "", map[string][]byte{sourceFile: []byte(`{"empty":"","space":" \t","quest/title":"Quest %s","nested":{"ignored":"no"}}`)})
+
+	count, catalogPath, err := buildCatalog(workspace)
+	if err == nil {
+		t.Fatal("buildCatalog() error = nil, want non-string value error")
+	}
+	if count != 0 || catalogPath != "" {
+		t.Fatalf("failed build = %d, %q", count, catalogPath)
+	}
+
+	if err := os.WriteFile(sourceFile, []byte(`{"empty":"","space":" \t","quest/title":"Quest %s"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	count, catalogPath, err = buildCatalog(workspace)
+	if err != nil {
+		t.Fatalf("buildCatalog() error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("KubeJS catalog count = %d, want 1", count)
+	}
+	entry := readCatalog(t, catalogPath).Entries[0]
+	if entry.SourceKind != "kubejs_lang" || entry.SourceFile != "sources/kubejs/assets/ftbquestlocalizer/lang/en_us.json" || entry.Locator != "/quest~1title" {
+		t.Fatalf("KubeJS entry identity = %#v", entry)
+	}
+	if entry.Source != "Quest %s" || entry.Writeback.Format != "json" || entry.Writeback.ValueType != "string" || entry.Writeback.Container != "object" {
+		t.Fatalf("KubeJS entry content/writeback = %#v", entry)
+	}
+	if len(entry.Tokens) != 1 {
+		t.Fatalf("KubeJS tokens = %#v", entry.Tokens)
+	}
+}
+
 func TestCatalogStableIDIgnoresSourceAndTracksFileHash(t *testing.T) {
 	workspace := t.TempDir()
 	file := filepath.Join(workspace, "assets", "example", "lang", pendingTranslationFileName())

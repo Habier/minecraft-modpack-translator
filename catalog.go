@@ -78,6 +78,9 @@ func buildCatalog(workspace string) (int, string, error) {
 	if err := b.extractLang(); err != nil {
 		return 0, "", err
 	}
+	if err := b.extractKubeJSLang(); err != nil {
+		return 0, "", err
+	}
 	if err := b.extractPatchouli(); err != nil {
 		return 0, "", err
 	}
@@ -169,6 +172,33 @@ func (b *catalogBuilder) extractLang() error {
 				continue
 			}
 			if err := b.add("standard_lang", filepath.ToSlash(filepath.Join("assets", relative)), "/"+escapePointer(key), value, "json", "string", "object", nil, data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (b *catalogBuilder) extractKubeJSLang() error {
+	root := filepath.Join(b.workspace, "sources", "kubejs", "assets")
+	return walkSelected(root, func(relative string) bool {
+		parts := strings.Split(filepath.ToSlash(relative), "/")
+		return len(parts) == 3 && parts[0] != "" && parts[1] == "lang" && parts[2] == sourceLanguageCode+".json"
+	}, func(filePath, relative string, data []byte) error {
+		var object map[string]json.RawMessage
+		if err := decodeJSONObjectUnique(data, &object); err != nil {
+			return fmt.Errorf("parse KubeJS lang %s: %w", filePath, err)
+		}
+		sourceFile := filepath.ToSlash(filepath.Join("sources", "kubejs", "assets", relative))
+		for key, raw := range object {
+			var value string
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return fmt.Errorf("KubeJS lang %s key %q must be a string", filePath, key)
+			}
+			if strings.TrimFunc(value, unicode.IsSpace) == "" {
+				continue
+			}
+			if err := b.add("kubejs_lang", sourceFile, "/"+escapePointer(key), value, "json", "string", "object", nil, data); err != nil {
 				return err
 			}
 		}
@@ -799,7 +829,7 @@ func escapePointer(value string) string {
 }
 
 func catalogEntryLess(a, b CatalogEntryV1) bool {
-	rank := map[string]int{"standard_lang": 0, "patchouli": 1, "ftbquests_snbt": 2, "ftbquests_json5": 3}
+	rank := map[string]int{"standard_lang": 0, "kubejs_lang": 1, "patchouli": 2, "ftbquests_snbt": 3, "ftbquests_json5": 4}
 	if rank[a.SourceKind] != rank[b.SourceKind] {
 		return rank[a.SourceKind] < rank[b.SourceKind]
 	}

@@ -15,6 +15,7 @@ coverage.html
 
 # Local caches and temporary files
 /.cache/
+/.codegraph/
 /tmp/
 *.log
 

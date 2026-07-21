@@ -17,7 +17,7 @@ import (
 	"testing"
 )
 
-func TestRunTranslateExtractsThenCachesWithoutExportWriteback(t *testing.T) {
+func TestRunTranslateExtractsCachesAndCreatesShareableZip(t *testing.T) {
 	modpack, jar := testModpack(t)
 	writeTestJar(t, jar, []zipEntry{{"assets/example/lang/en_us.json", []byte(`{"key":"Hello %s"}`)}})
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -43,7 +43,8 @@ func TestRunTranslateExtractsThenCachesWithoutExportWriteback(t *testing.T) {
 	defer server.Close()
 	t.Setenv("OLLAMA_HOST", server.URL)
 	t.Setenv("OLLAMA_MODEL", "fake:1")
-	if err := run([]string{modpack, "--translate"}); err != nil {
+	output, err := captureStdout(t, func() error { return run([]string{modpack, "--translate"}) })
+	if err != nil {
 		t.Fatal(err)
 	}
 	workspace, export := outputPaths(modpack)
@@ -53,6 +54,62 @@ func TestRunTranslateExtractsThenCachesWithoutExportWriteback(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(export, "translations")); !os.IsNotExist(err) {
 		t.Fatalf("translation cache under export: %v", err)
+	}
+	zipPath := filepath.Join(modpack, outputDirectory, "export", writebackZipName())
+	entries := zipEntryNames(t, zipPath)
+	if !hasZipEntry(entries, "resourcepacks/ModpackTranslations/assets/example/lang/es_es.json") {
+		t.Fatalf("ZIP entries = %#v, missing resource pack translation", entries)
+	}
+	if !strings.Contains(output, "Shareable ZIP:") || !strings.Contains(output, zipPath) {
+		t.Fatalf("output = %q, want shareable ZIP guidance", output)
+	}
+}
+
+func TestRunTranslateDoesNotCreateZipAfterPartialTranslation(t *testing.T) {
+	modpack, jar := testModpack(t)
+	writeTestJar(t, jar, []zipEntry{{"assets/example/lang/en_us.json", []byte(`{"bad":"Bad","good":"Good"}`)}})
+	zipPath := filepath.Join(modpack, outputDirectory, "export", writebackZipName())
+	if err := os.MkdirAll(filepath.Dir(zipPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(zipPath, []byte("old ZIP"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		start := strings.Index(body.Messages[0].Content, `[{"id":"`)
+		if start < 0 {
+			t.Fatalf("request prompt has no items: %s", body.Messages[0].Content)
+		}
+		var items []TranslationRequest
+		if err := json.Unmarshal([]byte(body.Messages[0].Content[start:]), &items); err != nil {
+			t.Fatal(err)
+		}
+		results := []TranslationResult{}
+		if len(items) == 1 && items[0].Source == "Good" {
+			results = append(results, TranslationResult{ID: items[0].ID, Translated: "Bueno"})
+		} else {
+			results = append(results, TranslationResult{ID: "unknown", Translated: "bad"})
+		}
+		content, _ := json.Marshal(map[string]any{"results": results})
+		json.NewEncoder(writer).Encode(map[string]any{"message": map[string]string{"content": string(content)}, "done": true})
+	}))
+	defer server.Close()
+	t.Setenv("OLLAMA_HOST", server.URL)
+	t.Setenv("OLLAMA_MODEL", "fake:1")
+	err := run([]string{modpack, "--translate"})
+	if err == nil {
+		t.Fatal("run succeeded after partial translation")
+	}
+	if _, statErr := os.Stat(zipPath); !os.IsNotExist(statErr) {
+		t.Fatalf("ZIP stat error = %v, want not exist", statErr)
 	}
 }
 
@@ -220,6 +277,9 @@ func TestRunCreatesWorkspaceAndExportWithoutPendingExportFiles(t *testing.T) {
 		{"assets/example/lang/en_us.json", []byte(`{"key":"English"}`)},
 		{"assets/example/patchouli_books/guide/en_us/entries/start.json", []byte(`{"name":"Start"}`)},
 	})
+	writeFiles(t, modpackPath, map[string][]byte{
+		"kubejs/assets/ftbquestlocalizer/lang/en_us.json": []byte(`{"quest":"Quest"}`),
+	})
 
 	workspacePath, exportPackPath := outputPaths(modpackPath)
 	stalePending := filepath.Join(exportPackPath, "assets", "stale", "lang", pendingTranslationFileName())
@@ -252,6 +312,9 @@ func TestRunCreatesWorkspaceAndExportWithoutPendingExportFiles(t *testing.T) {
 	if err != nil || len(patchouliMatches) != 1 {
 		t.Fatalf("workspace Patchouli files = %v, %v", patchouliMatches, err)
 	}
+	if _, err := os.Stat(filepath.Join(workspacePath, "sources", "kubejs", "assets", "ftbquestlocalizer", "lang", "en_us.json")); err != nil {
+		t.Fatalf("workspace KubeJS file: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(exportPackPath, "sources")); !os.IsNotExist(err) {
 		t.Fatalf("export sources directory should be absent, stat error = %v", err)
 	}
@@ -261,7 +324,7 @@ func TestRunCreatesWorkspaceAndExportWithoutPendingExportFiles(t *testing.T) {
 	if data, err := os.ReadFile(userFile); err != nil || string(data) != "keep" {
 		t.Errorf("unrelated export file = %q, %v; want preserved", data, err)
 	}
-	for _, want := range []string{workspacePath, exportPackPath, "archivos pendientes", "traducciones terminadas solamente", "Fuentes estándar:", "Fuentes Patchouli: 1 archivos", "Fuentes FTB Quests: 0 archivos"} {
+	for _, want := range []string{workspacePath, exportPackPath, "archivos pendientes", "traducciones terminadas solamente", "Fuentes estándar:", "Fuentes Patchouli: 1 archivos", "Fuentes FTB Quests: 0 archivos", "Fuentes KubeJS: 1 archivos"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("output = %q, want it to contain %q", output, want)
 		}
@@ -1025,6 +1088,33 @@ func captureStdout(t *testing.T, run func() error) (string, error) {
 		t.Fatalf("close stdout reader: %v", err)
 	}
 	return string(output), runErr
+}
+
+func zipEntryNames(t *testing.T, path string) []string {
+	t.Helper()
+	reader, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatalf("open ZIP: %v", err)
+	}
+	defer reader.Close()
+	entries := make([]string, 0, len(reader.File))
+	for _, file := range reader.File {
+		entries = append(entries, file.Name)
+	}
+	return entries
+}
+
+func hasZipEntry(entries []string, want string) bool {
+	for _, entry := range entries {
+		if entry == want {
+			return true
+		}
+	}
+	return false
+}
+
+func writebackZipName() string {
+	return "modpack-translations-es_es.zip"
 }
 
 func writeTestJar(t *testing.T, path string, entries []zipEntry) {
