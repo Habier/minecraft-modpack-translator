@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 
 	"modpack-translator/tokenprotect"
@@ -93,6 +95,23 @@ type translationFailure struct {
 	Reason   string `json:"reason"`
 }
 
+var (
+	translationLogMu sync.Mutex
+)
+
+func appendTranslationLog(format string, args ...any) {
+	path := "translation.log"
+	translationLogMu.Lock()
+	defer translationLogMu.Unlock()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(f, "[%s] %s\n", time.Now().UTC().Format(time.RFC3339), msg)
+}
+
 type preparedTranslation struct {
 	entry          CatalogEntryV1
 	protected      *tokenprotect.Text
@@ -153,6 +172,7 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 	}
 	sort.Strings(keys)
 	fmt.Printf("Translation progress: total=%d cached=%d translated=0 remaining=%d\n", len(prepared), cachedCount, len(prepared)-cachedCount)
+	appendTranslationLog("start total=%d cached=%d remaining=%d", len(prepared), cachedCount, len(prepared)-cachedCount)
 	if len(prepared) == 0 {
 		cache.Entries = []TranslationCacheEntryV2{}
 		if err := publishTranslationCache(cachePath, cache); err != nil {
@@ -161,6 +181,7 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 		if err := os.Remove(translationFailureReportPath(workspace, legacyOllamaModel)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove stale translation failure report: %w", err)
 		}
+		appendTranslationLog("done empty catalog")
 		fmt.Println("Translation summary: successful=0 cached=0 failed=0")
 		return nil
 	}
@@ -189,26 +210,32 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 			if err != nil {
 				var invalid *invalidTranslationResponseError
 				if !errors.As(err, &invalid) {
+					appendTranslationLog("fatal provider=%s model=%s entries=%d err=%s", lastIdentity.Provider, lastIdentity.Model, len(requests), err)
 					return err
 				}
+				appendTranslationLog("invalid response provider=%s model=%s entries=%d attempt=%d err=%s", lastIdentity.Provider, lastIdentity.Model, len(requests), attempt+1, err)
 				validationErr = invalid
 			} else {
 				validated, err := validateTranslationResults(batch.Results, byID)
 				if err == nil {
+					appendTranslationLog("validated provider=%s model=%s entries=%d", batch.Identity.Provider, batch.Identity.Model, len(requests))
 					fmt.Printf("Validated batch: provider=%s model=%s entries=%d\n", batch.Identity.Provider, batch.Identity.Model, len(requests))
 					return publishValidated(validated, byID, batch.Identity)
 				}
+				appendTranslationLog("validation failed provider=%s model=%s entries=%d attempt=%d err=%s", batch.Identity.Provider, batch.Identity.Model, len(requests), attempt+1, err)
 				validationErr = err
 			}
 		}
 		if len(requests) == 1 {
 			item := byID[requests[0].ID]
+			appendTranslationLog("singleton failure provider=%s model=%s id=%s reason=%s", lastIdentity.Provider, lastIdentity.Model, requests[0].ID, sanitizeFailureReason(validationErr.Error()))
 			for _, occurrence := range groups[item.key] {
 				failures = append(failures, translationFailure{ID: occurrence.entry.ID, Provider: lastIdentity.Provider, Model: lastIdentity.Model, Kind: "validation", Reason: sanitizeFailureReason(validationErr.Error())})
 			}
 			return nil
 		}
 		middle := len(requests) / 2
+		appendTranslationLog("splitting provider=%s model=%s entries=%d into %d+%d", lastIdentity.Provider, lastIdentity.Model, len(requests), len(requests[:middle]), len(requests[middle:]))
 		for _, half := range [][]TranslationRequest{requests[:middle], requests[middle:]} {
 			halfByID := make(map[string]preparedTranslation, len(half))
 			for _, request := range half {
@@ -243,10 +270,12 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 			byID[request.ID] = item
 		}
 		fmt.Printf("Translation batch %d: entries=%d bytes=%d remaining=%d\n", batchNumber, len(requests), size, len(prepared)-cachedCount-translatedCount)
+		appendTranslationLog("batch %d entries=%d bytes=%d remaining=%d", batchNumber, len(requests), size, len(prepared)-cachedCount-translatedCount)
 		if err := processBatch(requests, byID); err != nil {
 			return fmt.Errorf("translate batch %d: %w", batchNumber, err)
 		}
 		start = end
+		appendTranslationLog("progress total=%d cached=%d translated=%d remaining=%d", len(prepared), cachedCount, translatedCount, len(prepared)-cachedCount-translatedCount)
 		fmt.Printf("Translation progress: total=%d cached=%d translated=%d remaining=%d\n", len(prepared), cachedCount, translatedCount, len(prepared)-cachedCount-translatedCount)
 	}
 	reportPath := translationFailureReportPath(workspace, legacyOllamaModel)
@@ -260,6 +289,7 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 			return err
 		}
 		fmt.Printf("Translation summary: successful=%d cached=%d failed=%d (partial)\n", translatedCount, cachedCount, len(failures))
+		appendTranslationLog("done partial successful=%d cached=%d failed=%d", translatedCount, cachedCount, len(failures))
 		for i, failure := range failures {
 			if i == 10 {
 				fmt.Printf("  ... and %d more; see %s\n", len(failures)-i, reportPath)
@@ -272,6 +302,7 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 	if err := os.Remove(reportPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove stale translation failure report: %w", err)
 	}
+	appendTranslationLog("done successful=%d cached=%d failed=0", translatedCount, cachedCount)
 	fmt.Printf("Translation summary: successful=%d cached=%d failed=0\n", translatedCount, cachedCount)
 	return nil
 }

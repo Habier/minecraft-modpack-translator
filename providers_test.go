@@ -190,7 +190,7 @@ func TestProviderClassifiers(t *testing.T) {
 		kind     TranslationErrorKind
 	}{
 		{"gemini", 429, `{"error":{"status":"RESOURCE_EXHAUSTED","message":"quota exceeded"}}`, ErrorQuota},
-		{"gemini", 429, `{"error":{"message":"unknown throttle"}}`, ErrorUnavailable},
+		{"gemini", 429, `{"error":{"message":"unknown throttle"}}`, ErrorQuota},
 		{"cerebras", 429, `{"error":{"type":"rate_limit_exceeded","message":"Rate limit exceeded"}}`, ErrorQuota},
 		{"cerebras", 429, `{"error":{"message":"quota exhausted"}}`, ErrorQuota},
 		{"cerebras", 401, `{"error":{"message":"secret body"}}`, ErrorAuth},

@@ -318,19 +318,22 @@ func classifyProviderResponse(provider string, identity ProviderIdentity, status
 	case 400, 422:
 		kind = ErrorRequest
 	case 429:
-		if providerQuotaSignal(provider, lower) {
-			kind = ErrorQuota
-		} else {
-			kind = ErrorUnavailable
-		}
+		kind = ErrorQuota
 	default:
 		if status >= 500 {
 			kind = ErrorUnavailable
 		}
 	}
 	reason := fmt.Sprintf("HTTP %d", status)
-	if kind == ErrorQuota && provider == "openrouter" && strings.Contains(lower, "credit") {
-		reason = "OpenRouter reported insufficient credits"
+	if kind == ErrorQuota {
+		switch {
+		case provider == "openrouter" && strings.Contains(lower, "credit"):
+			reason = "HTTP 429 (OpenRouter insufficient credits)"
+		case providerQuotaSignal(provider, lower):
+			reason = "HTTP 429 (quota or rate limit)"
+		default:
+			reason = "HTTP 429 (rate limited)"
+		}
 	}
 	return &ProviderError{Identity: identity, Kind: kind, Reason: reason}
 }
