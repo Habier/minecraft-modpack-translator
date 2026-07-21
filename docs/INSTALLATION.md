@@ -1,6 +1,6 @@
 # Installation and User Guide
 
-Modpack Translator extracts English text from a Minecraft modpack, builds a normalized catalog, and prepares a translation workspace. With Ollama, it can also translate that catalog locally into a validated, resumable cache.
+Modpack Translator extracts English text from a Minecraft modpack, builds a normalized catalog, and prepares a translation workspace. It can translate through configured cloud providers in order and use Ollama as the final fallback, producing a validated resumable cache.
 
 It does **not yet write cached translations back into final format-specific JSON5, SNBT, or resource-pack language files**. The generated export currently contains the resource-pack structure and `pack.mcmeta`, not a finished translated modpack. Keep the workspace for future writeback support; do not distribute it as a completed translation.
 
@@ -8,14 +8,15 @@ It does **not yet write cached translations back into final format-specific JSON
 
 1. Back up the modpack or work on a launcher instance you can restore.
 2. Download the Windows amd64 release artifact and extract it to its own folder.
-3. Open PowerShell in that folder.
-4. Run extraction:
+3. Optional: copy `.env.example` into that folder as `.env`, fill only the providers you use, and restrict access to the plain-text file.
+4. Open PowerShell in that folder.
+5. Run extraction:
 
    ```powershell
    .\modpack-translator.exe "C:\path\to\your\modpack"
    ```
 
-5. Optional: [install Ollama](#optional-local-translation-with-ollama), pull the model, and run:
+6. Optional: [install Ollama](#optional-local-translation-with-ollama), pull the model, and run:
 
    ```powershell
    ollama pull qwen3:8b
@@ -29,7 +30,7 @@ The tool reads mod JARs and source files without modifying them. Its files are c
 | Use case | Requirements |
 |---|---|
 | Run extraction only | A matching release binary and an extracted Minecraft modpack containing `mods` plus supported version metadata |
-| Translate locally | The above, Ollama running locally, and the selected Ollama model |
+| Translate | The above, Ollama running with the selected fallback model, plus any optional cloud keys/models |
 | Build from source | Go 1.22 or newer; see [Developer Build Appendix](#developer-build-appendix) |
 
 Windows is the primary supported end-user platform. Linux amd64 and macOS binaries can be used when those variants are included in a release. Commands below distinguish platform differences; availability of a release artifact is not implied.
@@ -137,7 +138,71 @@ With no path, the tool checks the current directory and common official launcher
 
 If exactly one modpack is found, it is selected automatically. If several are found, the program prints a numbered list; enter one valid number and press Enter. If none is found, rerun with the quoted explicit path.
 
-## Optional Local Translation With Ollama
+## Translation Providers
+
+The chain order is fixed: **Gemini -> Cerebras -> Groq -> Mistral -> OpenRouter -> Ollama**. Missing cloud keys disable those providers. Every configured cloud key requires its matching model variable; the tool has no automatic model discovery and deliberately provides no cloud model default because current model availability and structured-output capabilities can change.
+
+### Configure `.env` beside the binary
+
+The program loads `.env` beside its resolved executable, and falls back to the current working directory if no file exists there. It never searches modpack, source repository, parent directories, home directory, or launcher folders. Existing process environment variables always take precedence over `.env` values.
+
+A missing `.env` is normal, including for extraction-only runs. An existing malformed or unreadable file is fatal: the error names the selected path and asks you to check permissions or `KEY=VALUE` syntax, but does not print file contents or secrets. The file is not encrypted; limit filesystem access and never include it in bug reports.
+
+Copy the supplied safe template as `.env`:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Using `go run .` finds your repository `.env` through the CWD fallback because the temporary test executable has none beside it. To exercise the production path, compile and place `.env` beside the resulting binary.
+
+| Provider | Required pair | Optional official-base override | Structured mode |
+|---|---|---|---|
+| Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL` | `GEMINI_BASE_URL` (official host only) | strict JSON schema |
+| Cerebras | `CEREBRAS_API_KEY`, `CEREBRAS_MODEL` | `CEREBRAS_BASE_URL` (official host only) | strict JSON schema |
+| Groq | `GROQ_API_KEY`, `GROQ_MODEL` | `GROQ_BASE_URL` (official host only) | JSON object |
+| Mistral | `MISTRAL_API_KEY`, `MISTRAL_MODEL` | `MISTRAL_BASE_URL` (official host only) | strict JSON schema |
+| OpenRouter | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | `OPENROUTER_BASE_URL` (official host only) | strict JSON schema with `provider.require_parameters` |
+| Ollama | none; `OLLAMA_MODEL` optional | `OLLAMA_HOST` | Ollama JSON schema |
+
+PowerShell configuration example:
+
+```powershell
+$env:GEMINI_API_KEY = "<gemini-api-key>"
+$env:GEMINI_MODEL = "<model-supporting-structured-output>"
+$env:CEREBRAS_API_KEY = "<cerebras-api-key>"
+$env:CEREBRAS_MODEL = "qwen-3-32b"
+$env:GROQ_API_KEY = "<groq-api-key>"
+$env:GROQ_MODEL = "<model-supporting-json-mode>"
+$env:MISTRAL_API_KEY = "<mistral-api-key>"
+$env:MISTRAL_MODEL = "<model-supporting-structured-output>"
+$env:OPENROUTER_API_KEY = "<openrouter-api-key>"
+$env:OPENROUTER_MODEL = "<provider/model-supporting-structured-output>"
+$env:OLLAMA_MODEL = "qwen3:8b"
+```
+
+POSIX one-command example:
+
+```bash
+GEMINI_API_KEY="<gemini-api-key>" GEMINI_MODEL="<model-supporting-structured-output>" \
+CEREBRAS_API_KEY="<cerebras-api-key>" CEREBRAS_MODEL="qwen-3-32b" \
+GROQ_API_KEY="<groq-api-key>" GROQ_MODEL="<model-supporting-json-mode>" \
+MISTRAL_API_KEY="<mistral-api-key>" MISTRAL_MODEL="<model-supporting-structured-output>" \
+OPENROUTER_API_KEY="<openrouter-api-key>" OPENROUTER_MODEL="<provider/model-supporting-structured-output>" \
+OLLAMA_MODEL="qwen3:8b" ./modpack-translator --translate "/path/to/modpack"
+```
+
+Keys are accepted through process environment variables or the binary-adjacent `.env`. Cerebras defaults to `https://api.cerebras.ai/v1`; all base URL overrides must use HTTPS and cannot contain credentials, query strings, or fragments. Never place keys in command arguments, documentation, cache files, or bug reports.
+
+Before translation, the program lists every provider in chain order with its enabled/disabled reason and enabled model. During work it identifies provider attempts, safe quota/rate transitions, and validated batches. It never prints keys or raw provider response bodies. Recursive validation splits retain entry counts so direct Ollama fallback and recovered sub-batches remain understandable.
+
+### Quotas, billing, and privacy
+
+The tool cannot guarantee free usage. Cerebras offers a free tier, but access is account- and rate-limited rather than guaranteed permanently zero-cost. Provider plans, routing, and billing rules can change; configure provider-side hard spend limits before enabling a key. After bounded retries, only a provider-aware recognized quota/rate-limit response advances the chain permanently for that run and retries the same batch. OpenRouter insufficient credits may advance, but it means only that OpenRouter reported insufficient credits, not that a free tier definitively ended. Authentication, permission, invalid configuration/request, model/schema incompatibility, network/unavailability, cancellation, and unknown errors stop the run.
+
+Cloud translation sends protected modpack text to the configured cloud service. Review each provider's privacy and retention policy. Ollama at its default host stays on the local machine; a custom `OLLAMA_HOST` sends text to that endpoint.
+
+## Ollama Fallback
 
 Ollama and its models are separate downloads. They are not bundled with Modpack Translator and remain subject to their own software and model licenses.
 
@@ -234,17 +299,17 @@ The selected model must already exist in Ollama. Modpack Translator does not dow
 
 ### Privacy, validation, and resume behavior
 
-With the default host, source text is sent only to Ollama on the same computer. No API key or other secret is needed. If you change `OLLAMA_HOST`, text is sent to that endpoint: use only a host you trust.
+When the chain reaches Ollama at its default host, source text stays on the same computer. Ollama needs no key. If you change `OLLAMA_HOST`, text is sent to that endpoint: use only a host you trust.
 
 Before requests, the tool replaces formatting codes, placeholders, URLs, resource identifiers, Patchouli macros, and similar tokens with deterministic markers. Ollama must return structured JSON with exactly one result per requested ID. Missing, duplicated, unknown, reordered where unsafe, or malformed markers reject the entire batch before it reaches the cache.
 
-Validated batches are atomically saved at:
+Validated batches are atomically saved with per-entry provider/model provenance at:
 
 ```text
-<modpack>/modpack-translator-output/workspace/translations/ollama/<model-safe-name>/translations.v1.json
+<modpack>/modpack-translator-output/workspace/translations/translations.v2.json
 ```
 
-You can interrupt the program with `Ctrl+C`. Completed batches already published to the cache remain available. Rerun the same `--translate` command to reuse matching entries and continue. Changes to source text, model, target locale, token signature, provider, or prompt invalidate only affected cache entries; the tool then translates what remains.
+You can interrupt the program with `Ctrl+C`. Completed batches remain available. Source text, target locale, token signature, or prompt changes invalidate affected entries; provider/model changes do not because they are provenance, not semantic identity. When v2 is absent, the tool imports only the configured Ollama model's strictly valid legacy `translations/ollama/<safe-model>/translations.v1.json`, leaves it untouched, and ignores other legacy model directories. Existing v2 always wins.
 
 ## Output Layout
 
@@ -264,7 +329,9 @@ You can interrupt the program with `Ctrl+C`. Completed batches already published
     |   |-- catalog/
     |   |   `-- catalog.v1.json
     |   `-- translations/
-    |       `-- ollama/<model-safe-name>/translations.v1.json
+    |       |-- translations.v2.json
+    |       |-- failures.v2.json (only for singleton validation failures)
+    |       `-- ollama/<model-safe-name>/translations.v1.json (legacy)
     `-- export/
         `-- overrides/
             `-- resourcepacks/
@@ -280,6 +347,10 @@ You can interrupt the program with `Ctrl+C`. Completed batches already published
 Original mod JARs, configuration, and worlds remain outside this tool-owned output tree and are not modified.
 
 ## Troubleshooting
+
+### A cloud provider stops the run
+
+Authentication and permission errors usually mean the key, account, or model access is wrong. Invalid request/model errors usually mean the selected model does not support the documented structured mode. The tool never silently downgrades strict schema mode. Network and service errors remain actionable rather than being mistaken for quota exhaustion. Verify the named provider, model, account limits, and official service status; errors intentionally omit response bodies and credentials.
 
 ### Ollama is unreachable
 
@@ -305,18 +376,18 @@ If `OLLAMA_MODEL` names another model, pull that exact model name instead.
 
 Errors include `parse translation cache safely`, `translation cache metadata does not match its model path`, or `translation cache entry ... is invalid`.
 
-Do not delete the cache immediately. Stop the tool, back up or rename the exact `translations.v1.json` file, then rerun to create a clean cache while preserving the old file for diagnosis:
+Do not delete the cache immediately. Stop the tool, back up or rename the exact `translations.v2.json` file, then rerun to create a clean cache while preserving the old file for diagnosis:
 
 Windows PowerShell:
 
 ```powershell
-Rename-Item ".\translations.v1.json" "translations.v1.json.backup"
+Rename-Item ".\translations.v2.json" "translations.v2.json.backup"
 ```
 
 Linux or macOS:
 
 ```bash
-mv "./translations.v1.json" "./translations.v1.json.backup"
+mv "./translations.v2.json" "./translations.v2.json.backup"
 ```
 
 Run those commands from the cache directory shown in the error/output, or use its full quoted path. A rebuilt cache retranslates entries because the renamed cache is no longer active.
@@ -325,7 +396,7 @@ Run those commands from the cache directory shown in the error/output, or use it
 
 Errors start with `validate batch ...` and may report missing, duplicated, unknown, altered, malformed, or out-of-order markers; unknown, duplicate, or missing result IDs; or an unexpected result count.
 
-No result from that failed batch is published. Rerun first: model output may vary. If failure repeats, preserve the cache and full error text for a bug report. Trying a different installed model creates a separate model-specific cache.
+No result from that failed batch is published. Rerun first: model output may vary. If failure repeats, preserve the cache and sanitized error text for a bug report. Changing providers or models does not create a separate cache; successful entries retain their original provenance.
 
 ### Minecraft version or metadata is unsupported
 
@@ -369,7 +440,9 @@ Use your operating system's normal application removal process to uninstall Olla
 
 ## Security Notes
 
-- Modpack Translator needs no passwords, API keys, or cloud credentials.
+- Cloud keys are optional and read from the process environment or binary-adjacent `.env`; they are never logged. The `.env` itself is user-managed plain text.
+- Cloud providers receive protected source text. Ollama is local only when its configured endpoint is local.
+- Configure provider-side hard spend limits; this tool cannot enforce or guarantee free usage.
 - Ollama binds to `127.0.0.1:11434` by default, so its API is local to your computer.
 - Do not configure Ollama to listen publicly. Its local API is not a public authentication boundary.
 - A custom `OLLAMA_HOST` sends modpack text to that server. Trust the server operator and network before using it.

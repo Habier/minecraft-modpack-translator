@@ -25,13 +25,21 @@ func validTranslationResults(requests []TranslationRequest) []TranslationResult 
 	return results
 }
 
-func (f *fakeTranslator) Translate(_ context.Context, requests []TranslationRequest) ([]TranslationResult, error) {
+func TestValidateTranslationResultsRejectsWrongCount(t *testing.T) {
+	requested := map[string]preparedTranslation{"a": {}, "b": {}}
+	if _, err := validateTranslationResults([]TranslationResult{{ID: "a"}}, requested); err == nil || !strings.Contains(err.Error(), "1 results for 2") {
+		t.Fatalf("count validation error=%v", err)
+	}
+}
+
+func (f *fakeTranslator) Translate(_ context.Context, requests []TranslationRequest) (TranslationBatch, error) {
 	copyRequests := append([]TranslationRequest(nil), requests...)
 	f.calls = append(f.calls, copyRequests)
 	if f.fn != nil {
-		return f.fn(len(f.calls), requests)
+		results, err := f.fn(len(f.calls), requests)
+		return TranslationBatch{Results: results, Identity: ProviderIdentity{Provider: "fake", Model: "test"}}, err
 	}
-	return validTranslationResults(requests), nil
+	return TranslationBatch{Results: validTranslationResults(requests), Identity: ProviderIdentity{Provider: "fake", Model: "test"}}, nil
 }
 
 func TestTranslateWorkspaceDeduplicatesBatchesCachesAndResumes(t *testing.T) {
@@ -92,8 +100,8 @@ func TestTranslateWorkspaceDeduplicatesBatchesCachesAndResumes(t *testing.T) {
 	if err := translateWorkspace(context.Background(), workspace, "model:2", otherModel, translationOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(otherModel.calls) != 1 || len(otherModel.calls[0]) != 3 {
-		t.Fatalf("model invalidation calls = %#v", otherModel.calls)
+	if len(otherModel.calls) != 0 {
+		t.Fatalf("provenance-only model change invalidated semantic cache: %#v", otherModel.calls)
 	}
 }
 
@@ -134,6 +142,17 @@ func TestTranslateWorkspaceRetriesInvalidResponseBeforeSplitting(t *testing.T) {
 	}
 	if len(provider.calls) != 2 || len(readTranslationCache(t, translationCachePath(workspace, "model")).Entries) != 2 {
 		t.Fatalf("calls=%d cache=%#v", len(provider.calls), readTranslationCache(t, translationCachePath(workspace, "model")).Entries)
+	}
+}
+
+func TestTranslateWorkspacePrintsValidatedProviderIdentity(t *testing.T) {
+	workspace := t.TempDir()
+	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "One", "a")})
+	output, err := captureStdout(t, func() error {
+		return translateWorkspace(context.Background(), workspace, "model", &fakeTranslator{}, translationOptions{})
+	})
+	if err != nil || !strings.Contains(output, "Validated batch: provider=fake model=test entries=1") {
+		t.Fatalf("output=%q error=%v", output, err)
 	}
 }
 
@@ -284,6 +303,46 @@ func TestTranslationCacheRecoversPreviousAndPublishesEmpty(t *testing.T) {
 	}
 }
 
+func TestTranslationCacheV2ImportsOnlySelectedValidLegacyCache(t *testing.T) {
+	workspace := t.TempDir()
+	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "One", "a")})
+	protected, _ := tokenprotect.Protect("One")
+	entry := TranslationCacheEntryV1{ID: "a", CacheKey: strings.Repeat("1", 64), SourceSHA256: sha256Hex("One"), TokenSignature: tokenSignature(protected.Tokens()), Translation: "Uno", TranslationSHA256: sha256Hex("Uno")}
+	legacy := TranslationCacheV1{Schema: "modpack-translator.translations/v1", Provider: "ollama", Model: "selected", TargetLocale: targetLanguageCode, PromptVersion: translationPromptV1, Entries: []TranslationCacheEntryV1{entry}}
+	data, _ := json.Marshal(legacy)
+	selectedPath := legacyTranslationCachePath(workspace, "selected")
+	writeFiles(t, "", map[string][]byte{selectedPath: data, legacyTranslationCachePath(workspace, "other"): []byte(`{"bad":true}`)})
+	provider := &fakeTranslator{}
+	if err := translateWorkspace(context.Background(), workspace, "selected", provider, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.calls) != 0 {
+		t.Fatalf("valid selected legacy cache was not reused: %#v", provider.calls)
+	}
+	cache := readTranslationCache(t, translationCachePath(workspace, "selected"))
+	if len(cache.Entries) != 1 || cache.Entries[0].Provider != "ollama" || cache.Entries[0].Model != "selected" {
+		t.Fatalf("cache=%#v", cache)
+	}
+	if got := string(mustRead(t, selectedPath)); got != string(data) {
+		t.Fatal("legacy v1 cache was modified")
+	}
+}
+
+func TestTranslationCacheV2PrecedenceAndMalformedLegacyFailClosed(t *testing.T) {
+	workspace := t.TempDir()
+	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "One", "a")})
+	writeFiles(t, "", map[string][]byte{legacyTranslationCachePath(workspace, "selected"): []byte(`{"bad":true}`)})
+	if err := translateWorkspace(context.Background(), workspace, "selected", &fakeTranslator{}, translationOptions{}); err == nil || !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("malformed legacy error=%v", err)
+	}
+	valid := TranslationCacheV2{Schema: translationSchema, TargetLocale: targetLanguageCode, PromptVersion: translationPromptV1, Entries: []TranslationCacheEntryV2{}}
+	data, _ := json.Marshal(valid)
+	writeFiles(t, "", map[string][]byte{translationCachePath(workspace, "selected"): data})
+	if err := translateWorkspace(context.Background(), workspace, "selected", &fakeTranslator{}, translationOptions{}); err != nil {
+		t.Fatalf("v2 did not take precedence: %v", err)
+	}
+}
+
 func TestLoadCatalogAbsentMalformedAndExportUntouched(t *testing.T) {
 	workspace := t.TempDir()
 	if _, err := loadCatalog(filepath.Join(workspace, "catalog", "catalog.v1.json")); err == nil || !strings.Contains(err.Error(), "absent") {
@@ -323,9 +382,9 @@ func writeTranslationCatalog(t *testing.T, workspace string, entries []CatalogEn
 	writeFiles(t, "", map[string][]byte{filepath.Join(workspace, "catalog", "catalog.v1.json"): data})
 }
 
-func readTranslationCache(t *testing.T, path string) TranslationCacheV1 {
+func readTranslationCache(t *testing.T, path string) TranslationCacheV2 {
 	t.Helper()
-	var cache TranslationCacheV1
+	var cache TranslationCacheV2
 	if err := json.Unmarshal(mustRead(t, path), &cache); err != nil {
 		t.Fatal(err)
 	}

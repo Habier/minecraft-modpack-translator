@@ -20,8 +20,7 @@ import (
 )
 
 const (
-	translationSchema   = "modpack-translator.translations/v1"
-	translationProvider = "ollama"
+	translationSchema   = "modpack-translator.translations/v2"
 	translationPromptV1 = "en-es-es-minecraft-v1"
 	defaultBatchSize    = 20
 	defaultBatchBytes   = 96 << 10
@@ -36,6 +35,24 @@ type TranslationCacheV1 struct {
 	TargetLocale  string                    `json:"target_locale"`
 	PromptVersion string                    `json:"prompt_version"`
 	Entries       []TranslationCacheEntryV1 `json:"entries"`
+}
+
+type TranslationCacheV2 struct {
+	Schema        string                    `json:"schema"`
+	TargetLocale  string                    `json:"target_locale"`
+	PromptVersion string                    `json:"prompt_version"`
+	Entries       []TranslationCacheEntryV2 `json:"entries"`
+}
+
+type TranslationCacheEntryV2 struct {
+	ID                string `json:"id"`
+	CacheKey          string `json:"cache_key"`
+	SourceSHA256      string `json:"source_sha256"`
+	TokenSignature    string `json:"token_signature"`
+	Translation       string `json:"translation"`
+	TranslationSHA256 string `json:"translation_sha256"`
+	Provider          string `json:"provider"`
+	Model             string `json:"model"`
 }
 
 type TranslationCacheEntryV1 struct {
@@ -65,14 +82,15 @@ func (e *TranslationPartialError) Error() string {
 
 type translationFailureReport struct {
 	Schema   string               `json:"schema"`
-	Provider string               `json:"provider"`
-	Model    string               `json:"model"`
 	Failures []translationFailure `json:"failures"`
 }
 
 type translationFailure struct {
-	ID     string `json:"id"`
-	Reason string `json:"reason"`
+	ID       string `json:"id"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Kind     string `json:"kind"`
+	Reason   string `json:"reason"`
 }
 
 type preparedTranslation struct {
@@ -83,7 +101,7 @@ type preparedTranslation struct {
 	tokenSignature string
 }
 
-func translateWorkspace(ctx context.Context, workspace, model string, translator Translator, options translationOptions) error {
+func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string, translator Translator, options translationOptions) error {
 	if options.BatchSize <= 0 {
 		options.BatchSize = defaultBatchSize
 	}
@@ -94,8 +112,8 @@ func translateWorkspace(ctx context.Context, workspace, model string, translator
 	if err != nil {
 		return err
 	}
-	cachePath := translationCachePath(workspace, model)
-	cache, err := loadTranslationCache(cachePath, model, catalog.TargetLocale)
+	cachePath := translationCachePath(workspace, legacyOllamaModel)
+	cache, err := loadTranslationCacheV2(cachePath, legacyTranslationCachePath(workspace, legacyOllamaModel), legacyOllamaModel, catalog.TargetLocale)
 	if err != nil {
 		return err
 	}
@@ -110,11 +128,11 @@ func translateWorkspace(ctx context.Context, workspace, model string, translator
 		}
 		sourceHash := sha256Hex(entry.Source)
 		signature := tokenSignature(protected.Tokens())
-		key := strings.Join([]string{sha256Hex(protected.Protected), signature, catalog.TargetLocale, translationProvider, model, translationPromptV1}, "|")
+		key := strings.Join([]string{sha256Hex(protected.Protected), signature, catalog.TargetLocale, translationPromptV1}, "|")
 		prepared = append(prepared, preparedTranslation{entry: entry, protected: protected, key: key, sourceHash: sourceHash, tokenSignature: signature})
 	}
 
-	validByID := make(map[string]TranslationCacheEntryV1)
+	validByID := make(map[string]TranslationCacheEntryV2)
 	for _, cached := range cache.Entries {
 		validByID[cached.ID] = cached
 	}
@@ -122,7 +140,9 @@ func translateWorkspace(ctx context.Context, workspace, model string, translator
 	groups := make(map[string][]preparedTranslation)
 	var keys []string
 	for _, item := range prepared {
-		if cached, ok := validByID[item.entry.ID]; ok && promptMatches && cached.CacheKey == sha256Hex(item.key) && cached.SourceSHA256 == item.sourceHash && cached.TokenSignature == item.tokenSignature && cached.TranslationSHA256 == sha256Hex(cached.Translation) {
+		if cached, ok := validByID[item.entry.ID]; ok && promptMatches && cached.SourceSHA256 == item.sourceHash && cached.TokenSignature == item.tokenSignature && cached.TranslationSHA256 == sha256Hex(cached.Translation) {
+			cached.CacheKey = sha256Hex(item.key)
+			validByID[item.entry.ID] = cached
 			cachedCount++
 			continue
 		}
@@ -134,11 +154,11 @@ func translateWorkspace(ctx context.Context, workspace, model string, translator
 	sort.Strings(keys)
 	fmt.Printf("Translation progress: total=%d cached=%d translated=0 remaining=%d\n", len(prepared), cachedCount, len(prepared)-cachedCount)
 	if len(prepared) == 0 {
-		cache.Entries = []TranslationCacheEntryV1{}
+		cache.Entries = []TranslationCacheEntryV2{}
 		if err := publishTranslationCache(cachePath, cache); err != nil {
 			return err
 		}
-		if err := os.Remove(translationFailureReportPath(workspace, model)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(translationFailureReportPath(workspace, legacyOllamaModel)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove stale translation failure report: %w", err)
 		}
 		fmt.Println("Translation summary: successful=0 cached=0 failed=0")
@@ -146,11 +166,11 @@ func translateWorkspace(ctx context.Context, workspace, model string, translator
 	}
 	translatedCount := 0
 	failures := []translationFailure{}
-	publishValidated := func(validated map[string]string, byID map[string]preparedTranslation) error {
+	publishValidated := func(validated map[string]string, byID map[string]preparedTranslation, identity ProviderIdentity) error {
 		for id, translation := range validated {
 			item := byID[id]
 			for _, occurrence := range groups[item.key] {
-				validByID[occurrence.entry.ID] = TranslationCacheEntryV1{ID: occurrence.entry.ID, CacheKey: sha256Hex(occurrence.key), SourceSHA256: occurrence.sourceHash, TokenSignature: occurrence.tokenSignature, Translation: translation, TranslationSHA256: sha256Hex(translation)}
+				validByID[occurrence.entry.ID] = TranslationCacheEntryV2{ID: occurrence.entry.ID, CacheKey: sha256Hex(occurrence.key), SourceSHA256: occurrence.sourceHash, TokenSignature: occurrence.tokenSignature, Translation: translation, TranslationSHA256: sha256Hex(translation), Provider: identity.Provider, Model: identity.Model}
 				translatedCount++
 			}
 		}
@@ -160,8 +180,12 @@ func translateWorkspace(ctx context.Context, workspace, model string, translator
 	var processBatch func([]TranslationRequest, map[string]preparedTranslation) error
 	processBatch = func(requests []TranslationRequest, byID map[string]preparedTranslation) error {
 		var validationErr error
+		var lastIdentity ProviderIdentity
 		for attempt := 0; attempt <= validationRetries; attempt++ {
-			results, err := translator.Translate(ctx, requests)
+			batch, err := translator.Translate(ctx, requests)
+			if batch.Identity.Provider != "" {
+				lastIdentity = batch.Identity
+			}
 			if err != nil {
 				var invalid *invalidTranslationResponseError
 				if !errors.As(err, &invalid) {
@@ -169,9 +193,10 @@ func translateWorkspace(ctx context.Context, workspace, model string, translator
 				}
 				validationErr = invalid
 			} else {
-				validated, err := validateTranslationResults(results, byID)
+				validated, err := validateTranslationResults(batch.Results, byID)
 				if err == nil {
-					return publishValidated(validated, byID)
+					fmt.Printf("Validated batch: provider=%s model=%s entries=%d\n", batch.Identity.Provider, batch.Identity.Model, len(requests))
+					return publishValidated(validated, byID, batch.Identity)
 				}
 				validationErr = err
 			}
@@ -179,7 +204,7 @@ func translateWorkspace(ctx context.Context, workspace, model string, translator
 		if len(requests) == 1 {
 			item := byID[requests[0].ID]
 			for _, occurrence := range groups[item.key] {
-				failures = append(failures, translationFailure{ID: occurrence.entry.ID, Reason: validationErr.Error()})
+				failures = append(failures, translationFailure{ID: occurrence.entry.ID, Provider: lastIdentity.Provider, Model: lastIdentity.Model, Kind: "validation", Reason: sanitizeFailureReason(validationErr.Error())})
 			}
 			return nil
 		}
@@ -224,10 +249,14 @@ func translateWorkspace(ctx context.Context, workspace, model string, translator
 		start = end
 		fmt.Printf("Translation progress: total=%d cached=%d translated=%d remaining=%d\n", len(prepared), cachedCount, translatedCount, len(prepared)-cachedCount-translatedCount)
 	}
-	reportPath := translationFailureReportPath(workspace, model)
+	reportPath := translationFailureReportPath(workspace, legacyOllamaModel)
+	cache.Entries = cacheEntriesInCatalogOrder(prepared, validByID)
+	if err := publishTranslationCache(cachePath, cache); err != nil {
+		return err
+	}
 	if len(failures) > 0 {
 		sort.Slice(failures, func(i, j int) bool { return failures[i].ID < failures[j].ID })
-		if err := publishTranslationFailureReport(reportPath, translationFailureReport{Schema: "modpack-translator.translation-failures/v1", Provider: translationProvider, Model: model, Failures: failures}); err != nil {
+		if err := publishTranslationFailureReport(reportPath, translationFailureReport{Schema: "modpack-translator.translation-failures/v2", Failures: failures}); err != nil {
 			return err
 		}
 		fmt.Printf("Translation summary: successful=%d cached=%d failed=%d (partial)\n", translatedCount, cachedCount, len(failures))
@@ -311,42 +340,76 @@ func loadCatalog(path string) (CatalogV1, error) {
 	return catalog, nil
 }
 
-func loadTranslationCache(path, model, locale string) (TranslationCacheV1, error) {
-	cache := TranslationCacheV1{Schema: translationSchema, Provider: translationProvider, Model: model, TargetLocale: locale, PromptVersion: translationPromptV1, Entries: []TranslationCacheEntryV1{}}
+func loadTranslationCacheV2(path, legacyPath, legacyModel, locale string) (TranslationCacheV2, error) {
+	cache := TranslationCacheV2{Schema: translationSchema, TargetLocale: locale, PromptVersion: translationPromptV1, Entries: []TranslationCacheEntryV2{}}
 	data, err := readFileLimited(path, 320<<20)
 	recovered := false
 	if errors.Is(err, os.ErrNotExist) {
 		data, err = readFileLimited(path+".previous", 320<<20)
 		if errors.Is(err, os.ErrNotExist) {
-			return cache, nil
+			return importLegacyTranslationCache(cache, legacyPath, legacyModel, locale)
 		}
 		recovered = true
 	}
 	if err != nil {
-		return TranslationCacheV1{}, fmt.Errorf("read translation cache: %w", err)
+		return TranslationCacheV2{}, fmt.Errorf("read translation cache: %w", err)
 	}
 	if err := decodeStrictJSON(data, &cache); err != nil {
-		return TranslationCacheV1{}, fmt.Errorf("parse translation cache safely: %w", err)
+		return TranslationCacheV2{}, fmt.Errorf("parse translation cache safely: %w", err)
 	}
-	if cache.Schema != translationSchema || cache.Provider != translationProvider || cache.Model != model || cache.TargetLocale != locale || cache.PromptVersion == "" {
-		return TranslationCacheV1{}, errors.New("translation cache metadata does not match its model path")
+	if cache.Schema != translationSchema || cache.TargetLocale != locale || cache.PromptVersion == "" {
+		return TranslationCacheV2{}, errors.New("translation cache metadata does not match the catalog")
 	}
-	seen := map[string]bool{}
-	for i, entry := range cache.Entries {
-		if entry.ID == "" || seen[entry.ID] || !isSHA256(entry.CacheKey) || !isSHA256(entry.SourceSHA256) || !isSHA256(entry.TokenSignature) || !isSHA256(entry.TranslationSHA256) || !utf8.ValidString(entry.Translation) || sha256Hex(entry.Translation) != entry.TranslationSHA256 {
-			return TranslationCacheV1{}, fmt.Errorf("translation cache entry %d is invalid", i)
-		}
-		seen[entry.ID] = true
+	if err := validateCacheV2Entries(cache.Entries); err != nil {
+		return TranslationCacheV2{}, err
 	}
 	if recovered {
 		if err := os.Rename(path+".previous", path); err != nil {
-			return TranslationCacheV1{}, fmt.Errorf("recover translation cache: %w", err)
+			return TranslationCacheV2{}, fmt.Errorf("recover translation cache: %w", err)
 		}
 	}
 	return cache, nil
 }
 
-func publishTranslationCache(path string, cache TranslationCacheV1) error {
+func importLegacyTranslationCache(cache TranslationCacheV2, path, model, locale string) (TranslationCacheV2, error) {
+	data, err := readFileLimited(path, 320<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return cache, nil
+	}
+	if err != nil {
+		return TranslationCacheV2{}, fmt.Errorf("read legacy translation cache: %w", err)
+	}
+	var legacy TranslationCacheV1
+	if err := decodeStrictJSON(data, &legacy); err != nil {
+		return TranslationCacheV2{}, fmt.Errorf("parse legacy translation cache safely: %w", err)
+	}
+	if legacy.Schema != "modpack-translator.translations/v1" || legacy.Provider != "ollama" || legacy.Model != model || legacy.TargetLocale != locale || legacy.PromptVersion == "" {
+		return TranslationCacheV2{}, errors.New("legacy translation cache metadata is invalid")
+	}
+	seen := map[string]bool{}
+	for i, entry := range legacy.Entries {
+		if entry.ID == "" || seen[entry.ID] || !isSHA256(entry.CacheKey) || !isSHA256(entry.SourceSHA256) || !isSHA256(entry.TokenSignature) || !isSHA256(entry.TranslationSHA256) || !utf8.ValidString(entry.Translation) || sha256Hex(entry.Translation) != entry.TranslationSHA256 {
+			return TranslationCacheV2{}, fmt.Errorf("legacy translation cache entry %d is invalid", i)
+		}
+		seen[entry.ID] = true
+		cache.Entries = append(cache.Entries, TranslationCacheEntryV2{ID: entry.ID, CacheKey: entry.CacheKey, SourceSHA256: entry.SourceSHA256, TokenSignature: entry.TokenSignature, Translation: entry.Translation, TranslationSHA256: entry.TranslationSHA256, Provider: "ollama", Model: model})
+	}
+	cache.PromptVersion = legacy.PromptVersion
+	return cache, nil
+}
+
+func validateCacheV2Entries(entries []TranslationCacheEntryV2) error {
+	seen := map[string]bool{}
+	for i, entry := range entries {
+		if entry.ID == "" || seen[entry.ID] || entry.Provider == "" || entry.Model == "" || strings.ContainsAny(entry.Provider+entry.Model, "\r\n\x00") || !isSHA256(entry.CacheKey) || !isSHA256(entry.SourceSHA256) || !isSHA256(entry.TokenSignature) || !isSHA256(entry.TranslationSHA256) || !utf8.ValidString(entry.Translation) || sha256Hex(entry.Translation) != entry.TranslationSHA256 {
+			return fmt.Errorf("translation cache entry %d is invalid", i)
+		}
+		seen[entry.ID] = true
+	}
+	return nil
+}
+
+func publishTranslationCache(path string, cache TranslationCacheV2) error {
 	data, err := json.MarshalIndent(cache, "", "  ")
 	if err != nil {
 		return err
@@ -355,7 +418,7 @@ func publishTranslationCache(path string, cache TranslationCacheV1) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("create translation cache directory: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".translations.v1-*.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".translations.v2-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -377,11 +440,15 @@ func publishTranslationCache(path string, cache TranslationCacheV1) error {
 }
 
 func translationCachePath(workspace, model string) string {
-	return filepath.Join(workspace, "translations", "ollama", safeModelName(model), "translations.v1.json")
+	return filepath.Join(workspace, "translations", "translations.v2.json")
 }
 
 func translationFailureReportPath(workspace, model string) string {
-	return filepath.Join(workspace, "translations", "ollama", safeModelName(model), "failures.v1.json")
+	return filepath.Join(workspace, "translations", "failures.v2.json")
+}
+
+func legacyTranslationCachePath(workspace, model string) string {
+	return filepath.Join(workspace, "translations", "ollama", safeModelName(model), "translations.v1.json")
 }
 
 func publishTranslationFailureReport(path string, report translationFailureReport) error {
@@ -393,7 +460,7 @@ func publishTranslationFailureReport(path string, report translationFailureRepor
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("create translation report directory: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".failures.v1-*.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".failures.v2-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -436,14 +503,24 @@ func isSHA256(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && len(decoded) == sha256.Size
 }
-func cacheEntriesInCatalogOrder(items []preparedTranslation, byID map[string]TranslationCacheEntryV1) []TranslationCacheEntryV1 {
-	result := make([]TranslationCacheEntryV1, 0, len(items))
+func cacheEntriesInCatalogOrder(items []preparedTranslation, byID map[string]TranslationCacheEntryV2) []TranslationCacheEntryV2 {
+	result := make([]TranslationCacheEntryV2, 0, len(items))
 	for _, item := range items {
 		if entry, ok := byID[item.entry.ID]; ok {
 			result = append(result, entry)
 		}
 	}
 	return result
+}
+
+func sanitizeFailureReason(reason string) string {
+	reason = strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\t' {
+			return -1
+		}
+		return r
+	}, reason)
+	return truncate(reason, 300)
 }
 func readFileLimited(path string, limit int64) ([]byte, error) {
 	file, err := os.Open(path)

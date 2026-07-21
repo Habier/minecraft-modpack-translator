@@ -18,6 +18,11 @@ coverage.html
 /tmp/
 *.log
 
+# Local provider credentials
+.env
+.env.*
+!.env.example
+
 # Generated Minecraft output from local runs
 /resourcepacks/
 /TraduccionModpack/

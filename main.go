@@ -36,6 +36,9 @@ type PackInfo struct {
 }
 
 func main() {
+	if err := loadExecutableEnv(); err != nil {
+		exitError(err)
+	}
 	if err := run(os.Args[1:]); err != nil {
 		exitError(err)
 	}
@@ -123,12 +126,12 @@ func runWithLanguageLimits(args []string, limits languageLimits) error {
 	fmt.Printf("\nWorkspace de traducción (archivos pendientes):\n%s\n", workspacePath)
 	fmt.Printf("\nResource pack de exportación (metadatos y traducciones terminadas solamente):\n%s\n", exportPackPath)
 	if options.translate {
-		host, model, timeout, err := ollamaConfigFromEnv(os.Getenv)
+		translator, model, err := buildTranslatorChain(os.Getenv)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("\nTranslating catalog locally with Ollama model %s\n", model)
-		if err := translateWorkspace(context.Background(), workspacePath, model, newOllamaTranslator(host, model, timeout), translationOptions{}); err != nil {
+		fmt.Printf("\n%s\nTranslating catalog with the configured provider chain\n", providerChainSummary(os.Getenv))
+		if err := translateWorkspace(context.Background(), workspacePath, model, translator, translationOptions{}); err != nil {
 			return err
 		}
 		fmt.Printf("Validated translations cached at:\n%s\n", translationCachePath(workspacePath, model))

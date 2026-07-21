@@ -1,14 +1,15 @@
 # Modpack Translator
 
-Modpack Translator prepares a translation workspace and a separate distributable export from modpack language sources. Extraction remains the default. An opt-in local Ollama step can translate the normalized catalog into a validated, resumable workspace cache; final JSON5/SNBT export writeback is not implemented yet.
+Modpack Translator prepares a translation workspace and a separate distributable export from modpack language sources. Extraction remains the default. Opt-in translation uses configured cloud providers in order, then local Ollama, and writes a validated resumable cache; final JSON5/SNBT export writeback is not implemented yet.
 
-> **Using a compiled release?** Follow the [Installation and User Guide](docs/INSTALLATION.md) to download the correct binary, extract a modpack, and optionally translate locally with Ollama. You do not need Go.
+> **Using a compiled release?** Follow the [Installation and User Guide](docs/INSTALLATION.md) for installation and provider configuration. You do not need Go.
 
 ## Prerequisites
 
 - Go 1.22 or newer
 - A Minecraft modpack directory containing a `mods` folder
-- Optional for local translation: [Ollama](https://ollama.com/) and the `qwen3:8b` model
+- Optional cloud provider API keys and explicitly selected models
+- [Ollama](https://ollama.com/) and the `qwen3:8b` model for the final fallback
 
 ## Quick Start
 
@@ -34,15 +35,50 @@ When no path is provided, the tool searches the current directory first, then co
 
 The default command extracts pending sources only. It prepares the export resource pack, but it does not claim to produce useful translated assets until a future writeback step writes real `es_es.json` files there.
 
-## Local Translation With Ollama
+## Translation Provider Chain
 
-Install Ollama, then download the default model once:
+The fixed order is **Gemini -> Cerebras -> Groq -> Mistral -> OpenRouter -> Ollama**. A cloud provider is enabled only when its API key is present; its model variable is then required. The tool retries bounded transient transport failures, advances permanently for that run only after a provider-specific recognized quota/rate-limit response, and retries the same batch. Authentication, permission, configuration, request/model incompatibility, network/unavailability, cancellation, and unknown failures stop with an actionable error. OpenRouter insufficient credits can advance the chain, but this does not prove that a free tier ended.
+
+At startup, the program loads `.env` beside its resolved executable, then falls back to the current working directory if no file exists there. Existing process variables always win over file values. It never searches modpack or repository parent directories. A missing file is normal; an existing malformed or unreadable file stops safely with its path and remediation, without printing contents or secrets. Copy `.env.example` as `.env` and restrict access because it is plain text, not encrypted.
+
+Using `go run .` builds a temporary executable, so the repository `.env` is found through the CWD fallback rather than the executable directory. To test the standard loading path, compile first:
+
+Install Ollama and download its fallback model:
 
 ```powershell
 ollama pull qwen3:8b
 ```
 
-Run extraction followed by local translation:
+PowerShell example:
+
+```powershell
+$env:GEMINI_API_KEY = "<gemini-api-key>"
+$env:GEMINI_MODEL = "<model-supporting-structured-output>"
+$env:CEREBRAS_API_KEY = "<cerebras-api-key>"
+$env:CEREBRAS_MODEL = "qwen-3-32b"
+$env:GROQ_API_KEY = "<groq-api-key>"
+$env:GROQ_MODEL = "<model-supporting-json-mode>"
+$env:MISTRAL_API_KEY = "<mistral-api-key>"
+$env:MISTRAL_MODEL = "<model-supporting-structured-output>"
+$env:OPENROUTER_API_KEY = "<openrouter-api-key>"
+$env:OPENROUTER_MODEL = "<provider/model-supporting-structured-output>"
+modpack-translator --translate "C:\path\to\your\modpack"
+```
+
+POSIX example:
+
+```bash
+GEMINI_API_KEY="<gemini-api-key>" GEMINI_MODEL="<model-supporting-structured-output>" \
+CEREBRAS_API_KEY="<cerebras-api-key>" CEREBRAS_MODEL="qwen-3-32b" \
+GROQ_API_KEY="<groq-api-key>" GROQ_MODEL="<model-supporting-json-mode>" \
+MISTRAL_API_KEY="<mistral-api-key>" MISTRAL_MODEL="<model-supporting-structured-output>" \
+OPENROUTER_API_KEY="<openrouter-api-key>" OPENROUTER_MODEL="<provider/model-supporting-structured-output>" \
+./modpack-translator --translate "/path/to/your/modpack"
+```
+
+All cloud variables are optional as pairs. With no cloud keys, translation uses Ollama directly. Each `*_BASE_URL` must use its provider's official HTTPS host; the override can only select an alternative path on that host. Defaults are the providers' official API roots.
+
+Run extraction followed by translation:
 
 ```powershell
 modpack-translator --translate "C:\path\to\your\modpack"
@@ -50,7 +86,22 @@ modpack-translator "C:\path\to\your\modpack" --translate
 modpack-translator --translate
 ```
 
-When the path is omitted, normal modpack auto-discovery still applies. The `qwen3:8b` default is a practical quality/performance target for a machine with an RTX 3070-class 8 GB GPU and 32 GB system RAM. Ollama may use both GPU and system memory depending on its configuration.
+When the path is omitted, normal modpack auto-discovery still applies. API keys come from the process environment or the binary-adjacent `.env` and are never printed. Cloud translation sends protected source text outside your machine and is subject to each provider's data practices. Default Ollama is local. **The tool cannot guarantee free usage:** Cerebras free-tier access is account- and rate-limited, and provider terms can change; configure provider-side hard spend limits and billing controls before enabling cloud keys.
+
+Translation prints a safe startup chain and provider provenance without keys or credential-bearing URLs, for example:
+
+```text
+Provider chain:
+  gemini: disabled (GEMINI_API_KEY not set)
+  cerebras: enabled model=qwen-3-32b
+  groq: disabled (GROQ_API_KEY not set)
+  mistral: disabled (MISTRAL_API_KEY not set)
+  openrouter: disabled (OPENROUTER_API_KEY not set)
+  ollama: enabled model=qwen3:8b (final fallback)
+Provider attempt: cerebras model=qwen-3-32b entries=20
+Provider transition: cerebras -> ollama reason=rate or quota limit
+Validated batch: provider=ollama model=qwen3:8b entries=10
+```
 
 | Environment variable | Default | Purpose |
 |---|---|---|
@@ -58,9 +109,9 @@ When the path is omitted, normal modpack auto-discovery still applies. The `qwen
 | `OLLAMA_MODEL` | `qwen3:8b` | Installed local model name |
 | `OLLAMA_TIMEOUT` | `30m` | Per-request limit; use a positive Go duration such as `2h` for slow CPU translation |
 
-No API key is used. Source text is sent only to the configured Ollama endpoint, which is local by default. The tool never downloads a missing model automatically; its error tells you which `ollama pull` command to run.
+The tool never downloads or discovers models automatically. Cloud model IDs are required because model availability and structured-output support change independently of API compatibility.
 
-Validated results are published after each successful batch or recovered sub-batch under `workspace/translations/ollama/<model-safe>/translations.v1.json`. An invalid structured response is retried once, then split deterministically until valid work is salvaged. Entries that still fail alone remain uncached, are listed in `failures.v1.json`, and produce a partial-completion error only after all other work finishes. Rerunning `--translate` retries only those uncached entries; a fully successful rerun removes the stale failure report. Source, model, target locale, token signature, provider, or prompt changes invalidate the affected cache entries.
+Validated results are published after each successful batch or recovered sub-batch under `workspace/translations/translations.v2.json`; every entry records its successful provider/model. Provider/model are provenance and do not invalidate semantically valid text. Invalid structured results retry once on the current provider, then split deterministically. Singleton validation failures appear in bounded `failures.v2.json`; fatal chain/configuration errors are not converted into entry failures. If v2 is absent, one strictly valid cache for the configured Ollama model may be imported from `translations/ollama/<safe-model>/translations.v1.json`; v1 remains untouched, arbitrary model directories are ignored, and v2 takes precedence.
 
 Translation currently stops at this workspace cache. It does **not** create final files under `export`, because safe generic writeback for the supported JSON5 and SNBT source structures is a separate unit of work.
 
@@ -105,9 +156,10 @@ One run creates or prepares both output areas inside the same modpack directory:
     │           └── config/ftbquests/quests/<original-relative-path>
     │               or defaultconfigs/ftbquests/quests/<original-relative-path>
     │   ├── catalog/catalog.v1.json
-    │   └── translations/ollama/<model-safe>/
-    │       ├── translations.v1.json
-    │       └── failures.v1.json (only when entries remain pending)
+    │   └── translations/
+    │       ├── translations.v2.json
+    │       ├── failures.v2.json (only when entries remain pending)
+    │       └── ollama/<model-safe>/translations.v1.json (legacy, untouched)
     └── export/
         └── overrides/
             └── resourcepacks/
@@ -116,7 +168,7 @@ One run creates or prepares both output areas inside the same modpack directory:
                     └── assets/ (future translated files only)
 ```
 
-`workspace` is translation work state and is not distributed. Pending files and validated Ollama cache entries remain there and are never copied into `export`.
+`workspace` is translation work state and is not distributed. Pending files and validated cache entries remain there and are never copied into `export`.
 
 `workspace/catalog/catalog.v1.json` is the deterministic, versioned input for a future translation provider. It contains decoded source strings, protected-token metadata, stable source locations, and writeback metadata, but no API keys, provider requests, or translations. It is atomically replaced only after all selected sources validate; a failed build preserves the previous complete catalog.
 
@@ -145,7 +197,7 @@ The source JARs are read only and are not modified.
 
 ## Translation Safety
 
-Translation providers pass every human-readable value through the reusable `tokenprotect` package. It shields printf placeholders, brace variables, Minecraft formatting codes, line breaks, Patchouli macros, resource identifiers, and URLs with opaque deterministic markers before any text reaches Ollama. URLs and complete Patchouli macros take precedence over their embedded resource identifiers, so overlapping syntax is protected exactly once.
+Translation providers pass every human-readable value through the reusable `tokenprotect` package. It shields printf placeholders, brace variables, Minecraft formatting codes, line breaks, Patchouli macros, resource identifiers, and URLs with opaque deterministic markers before any text reaches a provider. URLs and complete Patchouli macros take precedence over their embedded resource identifiers, so overlapping syntax is protected exactly once.
 
 Restoration requires every marker identity exactly once. Missing, duplicated, unknown, altered, or malformed markers reject the entire batch before cache publication. Providers may move independent markers and indexed printf placeholders, but unindexed printf arguments and the Patchouli macro stream retain source order because reordering those constructs can change meaning or break markup nesting.
 

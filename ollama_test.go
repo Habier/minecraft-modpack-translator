@@ -49,7 +49,7 @@ func TestOllamaRequestContractAndStructuredResponse(t *testing.T) {
 	host, _ := url.Parse(server.URL)
 	provider := newOllamaTranslator(host, "test:8b")
 	results, err := provider.Translate(context.Background(), []TranslationRequest{{ID: "id-1", Source: "Hello", SourceKind: "patchouli", SourceFile: "sources/guide.json"}})
-	if err != nil || len(results) != 1 || results[0].Translated != "Hola" {
+	if err != nil || len(results.Results) != 1 || results.Results[0].Translated != "Hola" {
 		t.Fatalf("Translate() = %#v, %v", results, err)
 	}
 }
@@ -111,7 +111,7 @@ func TestOllamaRetriesNetworkFailure(t *testing.T) {
 	})
 	provider.sleep = func(context.Context, time.Duration) error { return nil }
 	results, err := provider.Translate(context.Background(), []TranslationRequest{{ID: "id", Source: "Good"}})
-	if err != nil || calls != 2 || results[0].Translated != "Bien" {
+	if err != nil || calls != 2 || results.Results[0].Translated != "Bien" {
 		t.Fatalf("results=%#v calls=%d error=%v", results, calls, err)
 	}
 }
