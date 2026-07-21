@@ -220,7 +220,7 @@ func TestCerebrasQuotaFallsBackAndAuthStopsWithoutSecrets(t *testing.T) {
 		wantKind  TranslationErrorKind
 	}{
 		{"quota advances", 429, `{"error":{"type":"rate_limit_exceeded","message":"limit for cerebras-key-123"}}`, 1, ""},
-		{"auth stops", 401, `{"error":{"message":"invalid cerebras-key-123"}}`, 0, ErrorAuth},
+		{"auth advances", 401, `{"error":{"message":"invalid cerebras-key-123"}}`, 1, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -360,7 +360,7 @@ func TestBoundedRetryReachesFallback(t *testing.T) {
 	if err != nil || batch.Identity.Provider != "ollama" || delay != maxServerRetryDelay || fallback.calls != 1 {
 		t.Fatalf("batch=%#v delay=%v fallback calls=%d error=%v", batch, delay, fallback.calls, err)
 	}
-	if got := output.String(); !strings.Contains(got, "Provider attempt: groq model=m") || !strings.Contains(got, "Provider transition: groq -> ollama reason=rate or quota limit") || strings.Contains(got, "999999") || strings.Contains(got, "secret") {
+	if got := output.String(); !strings.Contains(got, "Provider attempt: groq model=m") || !strings.Contains(got, "Provider transition: groq -> ollama kind=quota_exhausted reason=quota_exhausted") || strings.Contains(got, "999999") || strings.Contains(got, "secret") {
 		t.Fatalf("safe feedback=%q", got)
 	}
 }
@@ -395,10 +395,16 @@ func TestChainAdvancesPermanentlyOnlyForQuota(t *testing.T) {
 	if gemini.calls != 1 || groq.calls != 2 {
 		t.Fatalf("calls gemini=%d groq=%d", gemini.calls, groq.calls)
 	}
-	fatal := &scriptedTranslator{errors: []error{&ProviderError{Identity: geminiID, Kind: ErrorAuth, Reason: "bad key"}}}
+	fatal := &scriptedTranslator{errors: []error{errors.New("not a provider error")}}
 	unused := &scriptedTranslator{}
 	_, err := (&chainTranslator{providers: []Translator{fatal, unused}}).Translate(context.Background(), nil)
 	if err == nil || unused.calls != 0 {
 		t.Fatalf("fatal error=%v fallback calls=%d", err, unused.calls)
+	}
+	authNowAdvances := &scriptedTranslator{identity: geminiID, errors: []error{&ProviderError{Identity: geminiID, Kind: ErrorAuth, Reason: "bad key"}}}
+	fallback := &scriptedTranslator{identity: ProviderIdentity{Provider: "fallback", Model: "m"}}
+	batch, err := (&chainTranslator{providers: []Translator{authNowAdvances, fallback}}).Translate(context.Background(), nil)
+	if err != nil || fallback.calls != 1 || batch.Identity.Provider != "fallback" {
+		t.Fatalf("batch=%#v error=%v fallback=%d", batch, err, fallback.calls)
 	}
 }

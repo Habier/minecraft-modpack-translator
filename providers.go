@@ -390,16 +390,18 @@ func (c *chainTranslator) Translate(ctx context.Context, items []TranslationRequ
 			return result, nil
 		}
 		var providerErr *ProviderError
-		if !errors.As(err, &providerErr) || providerErr.Kind != ErrorQuota {
+		if !errors.As(err, &providerErr) {
 			return TranslationBatch{}, err
 		}
+		appendTranslationLog("provider %s model %s entries=%d kind=%s reason=%s", providerErr.Identity.Provider, providerErr.Identity.Model, len(items), providerErr.Kind, safeTransitionReason(providerErr))
 		exhausted = append(exhausted, providerErr.Identity.Provider)
 		c.current++
 		if c.current < len(c.providers) {
 			next := translatorIdentity(c.providers[c.current])
-			fmt.Fprintf(c.writer(), "Provider transition: %s -> %s reason=%s\n", providerErr.Identity.Provider, next.Provider, safeTransitionReason(providerErr))
+			fmt.Fprintf(c.writer(), "Provider transition: %s -> %s kind=%s reason=%s\n", providerErr.Identity.Provider, next.Provider, providerErr.Kind, safeTransitionReason(providerErr))
 		}
 	}
+	appendTranslationLog("chain exhausted providers=%s", strings.Join(exhausted, ", "))
 	return TranslationBatch{}, &ProviderError{Identity: ProviderIdentity{Provider: "translation chain"}, Kind: ErrorQuota, Reason: "configured providers exhausted: " + strings.Join(exhausted, ", ")}
 }
 
@@ -422,10 +424,10 @@ func (o *openAITranslator) ProviderIdentity() ProviderIdentity {
 }
 
 func safeTransitionReason(err *ProviderError) string {
-	if strings.Contains(strings.ToLower(err.Reason), "insufficient credits") {
+	if err.Kind == ErrorQuota && strings.Contains(strings.ToLower(err.Reason), "insufficient credits") {
 		return "insufficient credits"
 	}
-	return "rate or quota limit"
+	return string(err.Kind)
 }
 
 func providerChainSummary(getenv func(string) string) string {
