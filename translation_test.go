@@ -156,6 +156,33 @@ func TestTranslateWorkspacePrintsValidatedProviderIdentity(t *testing.T) {
 	}
 }
 
+func TestTranslateWorkspaceRejectsDroppedAmpersandFormattingMarker(t *testing.T) {
+	workspace := t.TempDir()
+	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "&6Controller&r", "a")})
+	provider := &fakeTranslator{fn: func(_ int, requests []TranslationRequest) ([]TranslationResult, error) {
+		return []TranslationResult{{ID: requests[0].ID, Translated: "ES Controller"}}, nil
+	}}
+
+	err := translateWorkspace(context.Background(), workspace, "model", provider, translationOptions{})
+	var partial *TranslationPartialError
+	if !errors.As(err, &partial) || partial.Successful != 0 || partial.Failed != 1 {
+		t.Fatalf("partial error = %#v (%v)", partial, err)
+	}
+	if len(provider.calls) != validationRetries+1 {
+		t.Fatalf("provider calls = %d, want %d", len(provider.calls), validationRetries+1)
+	}
+	if entries := readTranslationCache(t, translationCachePath(workspace, "model")).Entries; len(entries) != 0 {
+		t.Fatalf("invalid translation cached = %#v", entries)
+	}
+	var report translationFailureReport
+	if err := json.Unmarshal(mustRead(t, partial.ReportPath), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Failures) != 1 || !strings.Contains(report.Failures[0].Reason, "missing marker") {
+		t.Fatalf("failure report = %#v", report.Failures)
+	}
+}
+
 func TestTranslateWorkspaceSplitsSalvagesContinuesAndRerunsFailures(t *testing.T) {
 	workspace := t.TempDir()
 	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "One", "a"), catalogTranslationEntry("b", "Two", "b"), catalogTranslationEntry("c", "Three", "c")})

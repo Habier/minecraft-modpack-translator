@@ -237,6 +237,9 @@ func recognize(s string, i int) (int, Kind) {
 	if i+2 <= len(s) && s[i] == 0xc2 && s[i+1] == 0xa7 && i+3 <= len(s) && isFormatCode(s[i+2]) {
 		return i + 3, KindFormatting
 	}
+	if i+1 < len(s) && s[i] == '&' && isFormatCode(s[i+1]) && !looksLikeOrdinaryAmpersand(s, i) {
+		return i + 2, KindFormatting
+	}
 	if i+2 <= len(s) && s[i] == '\\' && (s[i+1] == 'n' || s[i+1] == 'r') {
 		return i + 2, KindNewline
 	}
@@ -415,7 +418,30 @@ func isNamespaceChar(b byte) bool {
 func isResourceChar(b byte) bool  { return isNamespaceChar(b) || b == '/' }
 func isDigit(b byte) bool         { return b >= '0' && b <= '9' }
 func isASCIIAlphaNum(b byte) bool { return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || isDigit(b) }
+func isASCIILower(b byte) bool    { return b >= 'a' && b <= 'z' }
+func isASCIIUpper(b byte) bool    { return b >= 'A' && b <= 'Z' }
 func isFormatCode(b byte) bool {
 	b |= 0x20
 	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || strings.ContainsRune("klmnor", rune(b))
+}
+
+func looksLikeOrdinaryAmpersand(s string, i int) bool {
+	code := s[i+1]
+	after := byte(0)
+	if i+2 < len(s) {
+		after = s[i+2]
+	}
+	if isASCIILower(code) && isASCIILower(after) {
+		end := i + 2
+		for end < len(s) && isASCIILower(s[end]) {
+			end++
+		}
+		if end < len(s) && s[end] == ';' {
+			return true
+		}
+	}
+	if i > 0 && isASCIIUpper(s[i-1]) && isASCIIUpper(code) && (after == 0 || !isASCIIAlphaNum(after)) {
+		return true
+	}
+	return false
 }

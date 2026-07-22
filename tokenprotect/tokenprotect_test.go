@@ -20,6 +20,9 @@ func TestFind(t *testing.T) {
 		{"date-time and newline printf", "%tY %1$tF %TM %n", []string{"%tY", "%1$tF", "%TM", "%n"}},
 		{"malformed date-time printf", "%t %1$t %t? %1$t?", nil},
 		{"format codes case insensitive", "§Acolor §Lbold §Rreset §z", []string{"§A", "§L", "§R"}},
+		{"ampersand format codes", "&6Controller&r &l&o&cNO ORE&r", []string{"&6", "&r", "&l", "&o", "&c", "&r"}},
+		{"ampersand format codes before lowercase text", "&oitalic &abold &rreset", []string{"&o", "&a", "&r"}},
+		{"ordinary ampersands", "R&D, Tom & Jerry, and &copy;", nil},
 		{"URL wins over resource", "See https://example.com/wiki/minecraft:stone?q=a and mod:path", []string{"https://example.com/wiki/minecraft:stone?q=a", "mod:path"}},
 		{"Patchouli link wins over resource", "$(l:namespace:path)link$()", []string{"$(l:namespace:path)", "$()"}},
 		{"Unicode prose", "Español: pulsa {tecla}; English: visit mod:guía", []string{"{tecla}"}},
@@ -43,6 +46,8 @@ func TestRoundTrip(t *testing.T) {
 	cases := []string{
 		"plain prose",
 		"§aHola %s$(br)Pulsa {key} for mod:item.$()",
+		"&6Controller&r",
+		"&oitalic &abold &rreset",
 		"Repeated %s then %s and minecraft:stone twice minecraft:stone",
 		"Unicode español 日本語 ${player} https://example.org/a:b",
 		"line one\nline two\\nline three\r\n",
@@ -125,6 +130,7 @@ func TestRestoreOrderPolicy(t *testing.T) {
 		{"indexed printf order movable", "%1$s then %2$d", false},
 		{"Patchouli macro order required", "$(l:mod:page)link$()", true},
 		{"Minecraft formatting order required", "§aColor §lbold", true},
+		{"ampersand Minecraft formatting order required", "&l&o&cNO ORE&r", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
