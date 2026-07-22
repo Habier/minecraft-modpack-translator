@@ -218,30 +218,49 @@ func TestFTBQuestsExtraction(t *testing.T) {
 	}
 }
 
-func TestKubeJSLangExtractionSkipsExistingTarget(t *testing.T) {
-	root := t.TempDir()
-	files := map[string][]byte{
-		"kubejs/assets/ftbquestlocalizer/lang/en_us.json": []byte(`{"title":"Quest"}`),
-		"kubejs/assets/skipme/lang/en_us.json":            []byte(`{"title":"Already translated"}`),
-		"kubejs/assets/skipme/lang/es_es.json":            []byte(`{"title":"Ya traducido"}`),
-		"kubejs/assets/notlang/en_us.json":                []byte(`{"title":"Wrong shape"}`),
-		"kubejs/data/example/lang/en_us.json":             []byte(`{"title":"Wrong root"}`),
+func TestKubeJSLangExtractionRefreshExistingTarget(t *testing.T) {
+	tests := []struct {
+		name      string
+		refresh   bool
+		wantCount int
+		wantSkip  bool
+	}{
+		{name: "skip existing target", wantCount: 1, wantSkip: true},
+		{name: "refresh includes existing target", refresh: true, wantCount: 2},
 	}
-	writeFiles(t, root, files)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			files := map[string][]byte{
+				"kubejs/assets/ftbquestlocalizer/lang/en_us.json": []byte(`{"title":"Quest"}`),
+				"kubejs/assets/skipme/lang/en_us.json":            []byte(`{"title":"Already translated"}`),
+				"kubejs/assets/skipme/lang/es_es.json":            []byte(`{"title":"Ya traducido"}`),
+				"kubejs/assets/notlang/en_us.json":                []byte(`{"title":"Wrong shape"}`),
+				"kubejs/data/example/lang/en_us.json":             []byte(`{"title":"Wrong root"}`),
+			}
+			writeFiles(t, root, files)
 
-	extractor := mustExtractor(t, filepath.Join(root, "workspace"))
-	if err := extractor.extractKubeJSLang(root); err != nil {
-		t.Fatalf("extractKubeJSLang() error = %v", err)
+			extractor := mustExtractor(t, filepath.Join(root, "workspace"))
+			extractor.refresh = tt.refresh
+			if err := extractor.extractKubeJSLang(root); err != nil {
+				t.Fatalf("extractKubeJSLang() error = %v", err)
+			}
+			if extractor.counts.kubejs != tt.wantCount {
+				t.Fatalf("KubeJS count = %d, want %d", extractor.counts.kubejs, tt.wantCount)
+			}
+			got := mustRead(t, filepath.Join(extractor.stageRoot, "kubejs", "assets", "ftbquestlocalizer", "lang", "en_us.json"))
+			if string(got) != string(files["kubejs/assets/ftbquestlocalizer/lang/en_us.json"]) {
+				t.Fatalf("staged KubeJS bytes = %q", got)
+			}
+			skipPath := filepath.Join(extractor.stageRoot, "kubejs", "assets", "skipme", "lang", "en_us.json")
+			if tt.wantSkip {
+				assertAbsent(t, skipPath)
+			} else if string(mustRead(t, skipPath)) != string(files["kubejs/assets/skipme/lang/en_us.json"]) {
+				t.Fatalf("refreshed KubeJS bytes mismatch")
+			}
+			assertAbsent(t, filepath.Join(extractor.stageRoot, "kubejs", "assets", "notlang", "en_us.json"))
+		})
 	}
-	if extractor.counts.kubejs != 1 {
-		t.Fatalf("KubeJS count = %d, want 1", extractor.counts.kubejs)
-	}
-	got := mustRead(t, filepath.Join(extractor.stageRoot, "kubejs", "assets", "ftbquestlocalizer", "lang", "en_us.json"))
-	if string(got) != string(files["kubejs/assets/ftbquestlocalizer/lang/en_us.json"]) {
-		t.Fatalf("staged KubeJS bytes = %q", got)
-	}
-	assertAbsent(t, filepath.Join(extractor.stageRoot, "kubejs", "assets", "skipme", "lang", "en_us.json"))
-	assertAbsent(t, filepath.Join(extractor.stageRoot, "kubejs", "assets", "notlang", "en_us.json"))
 }
 
 func TestSourceCommitRemovesStaleFilesAndPreservesWorkspaceAndExport(t *testing.T) {

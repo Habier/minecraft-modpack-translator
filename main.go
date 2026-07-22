@@ -92,13 +92,16 @@ func runWithLanguageLimits(args []string, limits languageLimits) error {
 	}
 
 	fmt.Printf("Encontrados %d mods\n", len(jarFiles))
+	fmt.Printf("Refresh mode: %s\n", enabledDisabled(options.refresh))
 	extractor, err := newSourceExtractor(workspacePath)
 	if err != nil {
 		return err
 	}
+	extractor.refresh = options.refresh
 	defer extractor.abort()
 
 	languages := newLanguageAggregatorWithLimits(extractor.stageWorkspace, limits)
+	languages.refresh = options.refresh
 	for _, jarPath := range jarFiles {
 		if err := languages.addJar(jarPath); err != nil {
 			return fmt.Errorf("extract standard language from %s: %w", filepath.Base(jarPath), err)
@@ -421,6 +424,7 @@ type languageAggregator struct {
 	outputPath  string
 	byNamespace map[string]*namespaceLanguages
 	budget      languageBudget
+	refresh     bool
 }
 
 func newLanguageAggregator(outputPath string) *languageAggregator {
@@ -677,22 +681,15 @@ func (a *languageAggregator) publish() error {
 			continue
 		}
 		sort.Slice(files.sources, func(i, j int) bool { return files.sources[i].jar < files.sources[j].jar })
-		duplicateJars := make(map[string][]string)
 		for _, source := range files.sources {
+			keys := make([]string, 0, len(source.duplicates))
 			for key := range source.duplicates {
-				if !files.targets[key] {
-					duplicateJars[key] = append(duplicateJars[key], filepath.Base(source.jar))
-				}
-			}
-		}
-		if len(duplicateJars) > 0 {
-			keys := make([]string, 0, len(duplicateJars))
-			for key := range duplicateJars {
 				keys = append(keys, key)
 			}
 			sort.Strings(keys)
-			key := keys[0]
-			return fmt.Errorf("namespace %q duplicate source key %q in JAR(s) %q", namespace, key, strings.Join(duplicateJars[key], ", "))
+			for _, key := range keys {
+				fmt.Printf("[WARN] %s/%s: duplicate source key %q skipped\n", filepath.Base(source.jar), namespace, key)
+			}
 		}
 		merged := make(map[string]languageValue)
 		for _, source := range files.sources {
@@ -714,7 +711,7 @@ func (a *languageAggregator) publish() error {
 		}
 		values := make(map[string]string, len(merged))
 		for key, entry := range merged {
-			if !files.targets[key] {
+			if a.refresh || !files.targets[key] {
 				values[key] = entry.value
 			}
 		}
@@ -752,6 +749,13 @@ func targetLanguageFileName() string {
 
 func pendingTranslationFileName() string {
 	return targetLanguageCode + pendingFileSuffix + ".json"
+}
+
+func enabledDisabled(enabled bool) string {
+	if enabled {
+		return "enabled"
+	}
+	return "disabled"
 }
 
 func readLanguageFile(file *zip.File) ([]byte, error) {

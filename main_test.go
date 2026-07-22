@@ -405,7 +405,6 @@ func TestRunStandardLanguageFailuresPreserveWorkspace(t *testing.T) {
 		{"malformed JSON", []byte(`{"key":`), "EOF"},
 		{"invalid UTF-8", []byte{'{', '"', 'k', '"', ':', '"', 0xff, '"', '}'}, "file is not UTF-8"},
 		{"non-string value", []byte(`{"key":7}`), `key "key" must be a string`},
-		{"duplicate key", []byte(`{"key":"one","key":"two"}`), `namespace "example" duplicate source key "key" in JAR(s) "b.jar"`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			modpack, jar := testModpack(t)
@@ -421,9 +420,6 @@ func TestRunStandardLanguageFailuresPreserveWorkspace(t *testing.T) {
 			err := run([]string{modpack})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("run() error = %v, want %q", err, tt.want)
-			}
-			if tt.name == "duplicate key" && (strings.Contains(err.Error(), "one") || strings.Contains(err.Error(), "two")) {
-				t.Fatalf("duplicate error leaked source values: %v", err)
 			}
 			if got := workspaceSnapshot(t, workspace); got != before {
 				t.Fatal("failed extraction changed live workspace")
@@ -460,6 +456,71 @@ func TestRunSubtractsTargetKeysAcrossJarsRegardlessOfOrder(t *testing.T) {
 				t.Fatalf("pending = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunRefreshIncludesStandardLangTargetKeys(t *testing.T) {
+	modpack, jar := testModpack(t)
+	writeTestJar(t, jar, []zipEntry{
+		{"assets/example/lang/en_us.json", []byte(`{"translated":"Done","missing":"English"}`)},
+		{"assets/example/lang/es_es.json", []byte(`{"translated":"Ya"}`)},
+	})
+	if err := run([]string{modpack, "--refresh"}); err != nil {
+		t.Fatal(err)
+	}
+	workspace, _ := outputPaths(modpack)
+	if got := string(mustRead(t, filepath.Join(workspace, "assets", "example", "lang", pendingTranslationFileName()))); got != "{\n  \"missing\": \"English\",\n  \"translated\": \"Done\"\n}\n" {
+		t.Fatalf("pending = %q", got)
+	}
+}
+
+func TestRunRefreshSkipsDuplicateSourceKeyAndPublishesValidKeys(t *testing.T) {
+	modpack, jar := testModpack(t)
+	writeTestJar(t, jar, []zipEntry{
+		{"assets/example/lang/en_us.json", []byte(`{"_":"first","valid":"Pending","_":"second"}`)},
+		{"assets/example/lang/es_es.json", []byte(`{"_":"Traducido"}`)},
+	})
+
+	output, err := captureStdout(t, func() error { return run([]string{modpack, "--refresh"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, `duplicate source key "_" skipped`) {
+		t.Fatalf("output = %q, want duplicate source warning", output)
+	}
+
+	workspace, _ := outputPaths(modpack)
+	pending := filepath.Join(workspace, "assets", "example", "lang", pendingTranslationFileName())
+	if got := string(mustRead(t, pending)); got != "{\n  \"valid\": \"Pending\"\n}\n" {
+		t.Fatalf("pending = %q", got)
+	}
+}
+
+func TestRunRefreshPassesIntoKubeJSLangExtraction(t *testing.T) {
+	modpack, jar := testModpack(t)
+	writeTestJar(t, jar, []zipEntry{{"assets/example/lang/en_us.json", []byte(`{"key":"Value"}`)}})
+	writeFiles(t, modpack, map[string][]byte{
+		"kubejs/assets/example/lang/en_us.json": []byte(`{"title":"Quest"}`),
+		"kubejs/assets/example/lang/es_es.json": []byte(`{"title":"Misión"}`),
+	})
+
+	output, err := captureStdout(t, func() error { return run([]string{modpack, "--refresh"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "Refresh mode: enabled") {
+		t.Fatalf("output = %q, want refresh report", output)
+	}
+	workspace, _ := outputPaths(modpack)
+	catalog := readCatalog(t, filepath.Join(workspace, "catalog", "catalog.v1.json"))
+	found := false
+	for _, entry := range catalog.Entries {
+		if entry.SourceKind == "kubejs_lang" && entry.Source == "Quest" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("catalog entries = %#v, want refreshed KubeJS entry", catalog.Entries)
 	}
 }
 

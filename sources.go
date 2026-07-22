@@ -32,6 +32,7 @@ type sourceExtractor struct {
 	files          int
 	bytes          int64
 	counts         sourceCounts
+	refresh        bool
 }
 
 func newSourceExtractor(workspacePath string) (*sourceExtractor, error) {
@@ -246,7 +247,7 @@ func (e *sourceExtractor) extractKubeJSLang(modpackPath string) error {
 		if len(parts) != 3 || parts[0] == "" || parts[1] != "lang" || parts[2] != sourceLanguageCode+".json" {
 			return false
 		}
-		return !regularFile(filepath.Join(root, parts[0], "lang", targetLanguageCode+".json"))
+		return e.refresh || !regularFile(filepath.Join(root, parts[0], "lang", targetLanguageCode+".json"))
 	}, func(relative string, data []byte) error {
 		if err := e.write(filepath.Join("kubejs", "assets", relative), data); err != nil {
 			return err
