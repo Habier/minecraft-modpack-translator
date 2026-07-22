@@ -18,6 +18,7 @@ coverage.html
 /.codegraph/
 /tmp/
 *.log
+/openspec/
 
 # Local provider credentials
 .env
