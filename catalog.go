@@ -372,7 +372,7 @@ func (b *catalogBuilder) extractSNBT(sourceFile, relative string, data []byte) e
 		Title string `nbt:"title"`
 	}
 	type image struct {
-		Hover string `nbt:"hover"`
+		Hover ftbHover `nbt:"hover"`
 	}
 	type questFile struct {
 		Title       string   `nbt:"title"`
@@ -395,7 +395,7 @@ func (b *catalogBuilder) extractSNBT(sourceFile, relative string, data []byte) e
 		root["subtitle"] = stringsToAny(decoded.Subtitle)
 		images := make([]any, len(decoded.Images))
 		for i, image := range decoded.Images {
-			images[i] = map[string]any{"hover": image.Hover}
+			images[i] = map[string]any{"hover": stringsToAny(image.Hover)}
 		}
 		root["images"] = images
 	} else if dir == "quests" {
@@ -474,6 +474,32 @@ func (b *catalogBuilder) extractSNBT(sourceFile, relative string, data []byte) e
 				}
 			}
 		}
+	}
+	return nil
+}
+
+type ftbHover []string
+
+func (h *ftbHover) UnmarshalNBT(tagType byte, r nbt.DecoderReader) error {
+	var raw nbt.RawMessage
+	if err := raw.UnmarshalNBT(tagType, r); err != nil {
+		return err
+	}
+	switch tagType {
+	case nbt.TagString:
+		var value string
+		if err := raw.Unmarshal(&value); err != nil {
+			return err
+		}
+		*h = []string{value}
+	case nbt.TagList:
+		var values []string
+		if err := raw.Unmarshal(&values); err != nil {
+			return err
+		}
+		*h = values
+	default:
+		return fmt.Errorf("cannot parse Tag %#02x as FTB image hover", tagType)
 	}
 	return nil
 }

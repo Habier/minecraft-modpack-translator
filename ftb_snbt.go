@@ -331,12 +331,158 @@ func (p *ftbSNBTNormalizer) bareValue() error {
 		if !isSNBTBareValueByte(p.data[p.at]) {
 			return p.fail(p.at, "unsupported character in unquoted token")
 		}
-		p.copyByte()
+		p.at++
 	}
 	if p.at == start {
 		return p.fail(p.at, "expected token")
 	}
+	literal := p.data[start:p.at]
+	if expanded, ok, tooLarge := expandSNBTExponentLiteral(literal, p.maxOutput-len(p.out)); ok {
+		if tooLarge {
+			return p.fail(start, "normalized output growth limit exceeded")
+		}
+		p.out = append(p.out, expanded...)
+		return nil
+	} else if tooLarge {
+		return p.fail(start, "normalized output growth limit exceeded")
+	}
+	p.out = append(p.out, literal...)
 	return nil
+}
+
+func expandSNBTExponentLiteral(literal []byte, maxOutput int) ([]byte, bool, bool) {
+	if len(literal) == 0 {
+		return nil, false, false
+	}
+	suffix := byte(0)
+	number := literal
+	last := literal[len(literal)-1]
+	if strings.ContainsRune("dDfF", rune(last)) {
+		suffix = last
+		number = literal[:len(literal)-1]
+	}
+	eAt := -1
+	for i, value := range number {
+		if value == 'e' || value == 'E' {
+			if eAt != -1 {
+				return nil, false, false
+			}
+			eAt = i
+		}
+	}
+	if eAt <= 0 || eAt == len(number)-1 {
+		return nil, false, false
+	}
+	mantissa := number[:eAt]
+	exponent := number[eAt+1:]
+	sign := byte(0)
+	if mantissa[0] == '-' || mantissa[0] == '+' {
+		sign = mantissa[0]
+		mantissa = mantissa[1:]
+		if len(mantissa) == 0 {
+			return nil, false, false
+		}
+	}
+	expSign := 1
+	if exponent[0] == '-' || exponent[0] == '+' {
+		if exponent[0] == '-' {
+			expSign = -1
+		}
+		exponent = exponent[1:]
+		if len(exponent) == 0 {
+			return nil, false, false
+		}
+	}
+	fracDigits := 0
+	digits := make([]byte, 0, len(mantissa))
+	seenDot := false
+	seenDigit := false
+	for _, value := range mantissa {
+		switch {
+		case value >= '0' && value <= '9':
+			digits = append(digits, value)
+			seenDigit = true
+			if seenDot {
+				fracDigits++
+			}
+		case value == '.' && !seenDot:
+			seenDot = true
+		default:
+			return nil, false, false
+		}
+	}
+	if !seenDigit {
+		return nil, false, false
+	}
+	for _, value := range exponent {
+		if value < '0' || value > '9' {
+			return nil, false, false
+		}
+	}
+	digits = []byte(strings.TrimLeft(string(digits), "0"))
+	if len(digits) == 0 {
+		out := []byte{'0'}
+		if suffix != 0 {
+			out = append(out, suffix)
+		}
+		return out, true, false
+	}
+	expLimit := maxOutput + fracDigits + len(digits) + 1
+	exp, tooLarge := parseBoundedDecimal(exponent, expLimit)
+	if tooLarge {
+		return nil, true, true
+	}
+	exp *= expSign
+	scale := fracDigits - exp
+	outLen := len(digits)
+	if sign == '-' {
+		outLen++
+	}
+	if suffix != 0 {
+		outLen++
+	}
+	if scale <= 0 {
+		outLen += -scale
+	} else if scale >= len(digits) {
+		outLen += scale - len(digits) + 2
+	} else {
+		outLen++
+	}
+	if outLen > maxOutput {
+		return nil, true, true
+	}
+	out := make([]byte, 0, outLen)
+	if sign == '-' {
+		out = append(out, '-')
+	}
+	if scale <= 0 {
+		out = append(out, digits...)
+		out = append(out, strings.Repeat("0", -scale)...)
+	} else if scale >= len(digits) {
+		out = append(out, '0', '.')
+		out = append(out, strings.Repeat("0", scale-len(digits))...)
+		out = append(out, digits...)
+	} else {
+		split := len(digits) - scale
+		out = append(out, digits[:split]...)
+		out = append(out, '.')
+		out = append(out, digits[split:]...)
+	}
+	if suffix != 0 {
+		out = append(out, suffix)
+	}
+	return out, true, false
+}
+
+func parseBoundedDecimal(value []byte, limit int) (int, bool) {
+	parsed := 0
+	for _, digit := range value {
+		if parsed > (limit-int(digit-'0'))/10 {
+			return 0, true
+		}
+		parsed = parsed*10 + int(digit-'0')
+	}
+	return parsed, false
 }
 
 func isSNBTDelimiter(value byte) bool {

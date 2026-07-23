@@ -107,6 +107,62 @@ func TestCatalogExtractsKubeJSLangEntries(t *testing.T) {
 	}
 }
 
+func TestCatalogExtractsFTBChapterImageHoverLists(t *testing.T) {
+	tests := []struct {
+		name        string
+		snbt        string
+		wantSources []string
+		wantCount   int
+	}{
+		{
+			name:        "empty hover list",
+			snbt:        `{title:"Chapter",subtitle:[],images:[{hover:[]}]}`,
+			wantSources: []string{"Chapter"},
+			wantCount:   1,
+		},
+		{
+			name:        "non-empty hover list",
+			snbt:        `{title:"Chapter",subtitle:[],images:[{hover:["First line","Second line"]}]}`,
+			wantSources: []string{"Chapter", "First line", "Second line"},
+			wantCount:   3,
+		},
+		{
+			name:        "scalar hover",
+			snbt:        `{title:"Chapter",subtitle:[],images:[{hover:"Single line"}]}`,
+			wantSources: []string{"Chapter", "Single line"},
+			wantCount:   2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeFiles(t, "", map[string][]byte{
+				filepath.Join(workspace, "sources", "ftbquests", "config", "ftbquests", "quests", "chapters", "chapter.snbt"): []byte(tt.snbt),
+			})
+
+			count, catalogPath, err := buildCatalog(workspace)
+			if err != nil {
+				t.Fatalf("buildCatalog() error = %v", err)
+			}
+			if count != tt.wantCount {
+				t.Fatalf("catalog count = %d, want %d", count, tt.wantCount)
+			}
+			bySource := map[string]CatalogEntryV1{}
+			for _, entry := range readCatalog(t, catalogPath).Entries {
+				bySource[entry.Source] = entry
+			}
+			for _, source := range tt.wantSources {
+				if _, ok := bySource[source]; !ok {
+					t.Errorf("catalog is missing %q", source)
+				}
+			}
+			if entry, ok := bySource["First line"]; ok && (entry.Locator != "/images/0/hover/0" || entry.Writeback.Container != "array" || entry.Writeback.ArrayIndex == nil || *entry.Writeback.ArrayIndex != 0) {
+				t.Fatalf("first hover entry = %#v", entry)
+			}
+		})
+	}
+}
+
 func TestCatalogStableIDIgnoresSourceAndTracksFileHash(t *testing.T) {
 	workspace := t.TempDir()
 	file := filepath.Join(workspace, "assets", "example", "lang", pendingTranslationFileName())

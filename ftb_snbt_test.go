@@ -33,6 +33,7 @@ func TestNormalizeFTBQuestSNBT(t *testing.T) {
 		{name: "compound values", in: `{left:{a:1},right:{b:2}}`, want: `{left:{a:1},right:{b:2}}`},
 		{name: "compound quoted string", in: "{title:\"one\"\nsubtitle : 'two'}", want: "{title:\"one\"\n,subtitle : 'two'}"},
 		{name: "compound numeric values", in: `{integer:1 float:2.5 typed:3b next:4L}`, want: `{integer:1 ,float:2.5 ,typed:3b ,next:4L}`},
+		{name: "exponent numeric values", in: `{stats:{heal:1.8E-4d lower:2.5e+3F next:1} id:minecraft:1e-thing}`, want: `{stats:{heal:0.00018d ,lower:2500F ,next:1} ,id:minecraft:1e-thing}`},
 		{name: "compound bare values", in: `{enabled:true state:available tag:#forge:ingots item:minecraft:stone}`, want: `{enabled:true ,state:available ,tag:#forge:ingots ,item:minecraft:stone}`},
 		{name: "compound collection values", in: `{items:[1,2] nested:{value:1} "final key" :"done"}`, want: `{items:[1,2] ,nested:{value:1} ,"final key" :"done"}`},
 		{name: "compound typed array value", in: `{bytes:[B;1b,2b] next:3}`, want: `{bytes:[B;1b,2b] ,next:3}`},
@@ -98,6 +99,28 @@ func TestNormalizeFTBQuestSNBTRejectsMalformedInputWithLocation(t *testing.T) {
 	}
 }
 
+func TestNormalizeFTBQuestSNBTRejectsHugeExponentExpansion(t *testing.T) {
+	hugeExponent := strings.Repeat("9", 10000)
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{name: "huge positive exponent", in: `{value:1e` + hugeExponent + `}`},
+		{name: "huge negative exponent", in: `{value:1e-` + hugeExponent + `}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := normalizeFTBQuestSNBT([]byte(tt.in))
+			if err == nil {
+				t.Fatal("normalizeFTBQuestSNBT() error = nil")
+			}
+			if !strings.Contains(err.Error(), "normalized output growth limit exceeded") {
+				t.Fatalf("error = %q, want growth-limit error", err)
+			}
+		})
+	}
+}
+
 func TestNormalizedTypedArraysParseWithTnze(t *testing.T) {
 	data := []byte(`{bytes:[B;-128b 0B 127b],ints:[I;-2147483648 0 2147483647],longs:[L;-9223372036854775808l 0L 9223372036854775807l]}`)
 	normalized, err := normalizeFTBQuestSNBT(data)
@@ -107,6 +130,23 @@ func TestNormalizedTypedArraysParseWithTnze(t *testing.T) {
 	var binaryNBT bytes.Buffer
 	if err := nbt.StringifiedMessage(normalized).MarshalNBT(&binaryNBT); err != nil {
 		t.Fatalf("Tnze rejected normalized typed arrays: %v", err)
+	}
+}
+
+func TestNormalizedExponentValuesParseWithTnze(t *testing.T) {
+	data := []byte(`{stats:{heal:1.8E-4d lower:2.5e+3F next:1}}`)
+	normalized, err := normalizeFTBQuestSNBT(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"heal:0.00018d", "lower:2500F"} {
+		if !strings.Contains(string(normalized), want) {
+			t.Fatalf("normalized = %q, want to contain %q", normalized, want)
+		}
+	}
+	var binaryNBT bytes.Buffer
+	if err := nbt.StringifiedMessage(normalized).MarshalNBT(&binaryNBT); err != nil {
+		t.Fatalf("Tnze rejected normalized exponent values: %v", err)
 	}
 }
 
