@@ -8,6 +8,12 @@ Modpack Translator extracts translatable text from supported modpack sources, tr
 
 ## Basic usage
 
+Automatically find modpacks and choose one to translate:
+
+```powershell
+modpack-translator --translate
+```
+
 Extract sources only:
 
 ```powershell
@@ -18,12 +24,6 @@ Extract and translate:
 
 ```powershell
 modpack-translator --translate "C:\path\to\your\modpack"
-```
-
-You can also omit the path:
-
-```powershell
-modpack-translator --translate
 ```
 
 When no path is provided, the tool searches common Minecraft launcher locations. If it finds one modpack, it uses it. If it finds several, it asks you to choose one by number.
