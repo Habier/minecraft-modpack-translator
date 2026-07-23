@@ -120,12 +120,13 @@ type zipEntry struct {
 
 func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 	tests := []struct {
-		name    string
-		entries []zipEntry
-		ok      []string
-		pending map[string][]byte
-		absent  []string
-		output  string
+		name      string
+		entries   []zipEntry
+		ok        []string
+		pending   map[string][]byte
+		absent    []string
+		noPending []string
+		output    string
 	}{
 		{
 			name: "preserves Spanish byte for byte",
@@ -144,6 +145,43 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 			pending: map[string][]byte{"example": []byte("{\n  \"key\": \"English\"\n}\n")},
 			absent:  []string{"example"},
 			output:  "[PENDING] example: assets/example/lang/es_es.pending.json",
+		},
+		{
+			name: "writes BOM-prefixed English to pending translation source",
+			entries: []zipEntry{
+				{"assets/refinedstorage/lang/en_us.json", append([]byte{0xEF, 0xBB, 0xBF}, []byte("{\"key\":\"English\"}")...)},
+			},
+			pending: map[string][]byte{"refinedstorage": []byte("{\n  \"key\": \"English\"\n}\n")},
+			absent:  []string{"refinedstorage"},
+			output:  "[PENDING] refinedstorage: assets/refinedstorage/lang/es_es.pending.json",
+		},
+		{
+			name: "skips empty English without pending translation source",
+			entries: []zipEntry{
+				{"assets/example/lang/en_us.json", nil},
+			},
+			absent:    []string{"example"},
+			noPending: []string{"example"},
+			output:    "[SKIP] assets/example/lang/en_us.json: empty en_us.json",
+		},
+		{
+			name: "skips whitespace English without pending translation source",
+			entries: []zipEntry{
+				{"assets/example/lang/en_us.json", []byte(" \n\t")},
+			},
+			absent:    []string{"example"},
+			noPending: []string{"example"},
+			output:    "[SKIP] assets/example/lang/en_us.json: empty en_us.json",
+		},
+		{
+			name: "reads BOM-prefixed Spanish target before pending missing English keys",
+			entries: []zipEntry{
+				{"assets/refinedstorage/lang/es_es.json", append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{"translated":"Spanish"}`)...)},
+				{"assets/refinedstorage/lang/en_us.json", []byte(`{"translated":"English","missing":"Pending"}`)},
+			},
+			ok:      []string{"refinedstorage"},
+			pending: map[string][]byte{"refinedstorage": []byte("{\n  \"missing\": \"Pending\"\n}\n")},
+			output:  "[OK] mod.jar/refinedstorage: es_es.json existente",
 		},
 		{
 			name: "same JAR full Spanish target emits no pending when English appears last",
@@ -174,6 +212,15 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 			ok:      []string{"example"},
 			pending: map[string][]byte{"example": []byte("{\n  \"missing\": \"Pending\"\n}\n")},
 			output:  "[OK] mod.jar/example: es_es.json existente",
+		},
+		{
+			name: "malformed Spanish target is ignored before pending English keys",
+			entries: []zipEntry{
+				{"assets/farmersdelight/lang/es_es.json", []byte(`{"tag.item.farmersdelight.wolf_prey":"Presa" "item.farmersdelight.tomato":"Tomate"}`)},
+				{"assets/farmersdelight/lang/en_us.json", []byte(`{"item.farmersdelight.tomato":"Tomato"}`)},
+			},
+			pending: map[string][]byte{"farmersdelight": []byte("{\n  \"item.farmersdelight.tomato\": \"Tomato\"\n}\n")},
+			output:  `[WARN] mod.jar/farmersdelight: ignoring malformed target assets/farmersdelight/lang/es_es.json: invalid character '"' after object key:value pair`,
 		},
 		{
 			name: "skips namespace without English or Spanish",
@@ -244,6 +291,13 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 
 			for _, namespace := range tt.absent {
 				path := filepath.Join(outputPath, "assets", namespace, "lang", targetLanguageFileName())
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Errorf("expected %s to be absent, stat error = %v", path, err)
+				}
+			}
+
+			for _, namespace := range tt.noPending {
+				path := filepath.Join(outputPath, "assets", namespace, "lang", pendingTranslationFileName())
 				if _, err := os.Stat(path); !os.IsNotExist(err) {
 					t.Errorf("expected %s to be absent, stat error = %v", path, err)
 				}
@@ -395,16 +449,45 @@ func TestRunMergesStandardLanguagesByKey(t *testing.T) {
 	}
 }
 
+func TestRunSkipsConflictingCrossJarSourceKey(t *testing.T) {
+	modpack, jar := testModpack(t)
+	os.Remove(jar)
+	baseJar := filepath.Join(modpack, "mods", "L_Enders_Cataclysm-3.27-curios-fix.jar")
+	addonJar := filepath.Join(modpack, "mods", "integrated_cataclysm_forge-1.0.5+1.20.1.jar")
+	writeTestJar(t, baseJar, []zipEntry{
+		{"assets/cataclysm/lang/en_us.json", []byte(`{"abyss_blast.sub":"Leviathan prepares abyss blast","base.key":"Base text"}`)},
+		{"assets/cataclysm/lang/es_es.json", []byte(`{"abyss_blast.sub":"Leviatán prepara explosión abisal"}`)},
+	})
+	writeTestJar(t, addonJar, []zipEntry{
+		{"assets/cataclysm/lang/en_us.json", []byte(`{"abyss_blast.sub":"Leviathan prepares Abyss Blast","addon.key":"Addon text"}`)},
+	})
+
+	output, err := captureStdout(t, func() error { return run([]string{modpack}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWarning := `[WARN] namespace "cataclysm" translation key "abyss_blast.sub" conflicts between JARs "L_Enders_Cataclysm-3.27-curios-fix.jar" and "integrated_cataclysm_forge-1.0.5+1.20.1.jar"; key skipped`
+	if !strings.Contains(output, wantWarning) {
+		t.Fatalf("output = %q, want warning %q", output, wantWarning)
+	}
+	workspace, _ := outputPaths(modpack)
+	pending := string(mustRead(t, filepath.Join(workspace, "assets", "cataclysm", "lang", pendingTranslationFileName())))
+	if strings.Contains(pending, "abyss_blast.sub") {
+		t.Fatalf("pending = %q, conflicting key was included", pending)
+	}
+	if pending != "{\n  \"addon.key\": \"Addon text\",\n  \"base.key\": \"Base text\"\n}\n" {
+		t.Fatalf("pending = %q", pending)
+	}
+}
+
 func TestRunStandardLanguageFailuresPreserveWorkspace(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		source []byte
 		want   string
 	}{
-		{"conflicting value", []byte(`{"key":"incoming"}`), `translation key "key" conflicts between JARs "a.jar" and "b.jar"`},
 		{"malformed JSON", []byte(`{"key":`), "EOF"},
 		{"invalid UTF-8", []byte{'{', '"', 'k', '"', ':', '"', 0xff, '"', '}'}, "file is not UTF-8"},
-		{"non-string value", []byte(`{"key":7}`), `key "key" must be a string`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			modpack, jar := testModpack(t)
@@ -426,6 +509,100 @@ func TestRunStandardLanguageFailuresPreserveWorkspace(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunSkipsNonStringSourceLanguageKeys(t *testing.T) {
+	modpack, jar := testModpack(t)
+	writeTestJar(t, jar, []zipEntry{{"assets/example/lang/en_us.json", []byte(`{"itemGroup.example.colored":[{"text":"Example","color":"#F2A6FF"}],"item.example.name":"Example Item"}`)}})
+
+	output, err := captureStdout(t, func() error { return run([]string{modpack}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWarning := `[WARN] mod.jar/example: non-string source key "itemGroup.example.colored" skipped`
+	if !strings.Contains(output, wantWarning) {
+		t.Fatalf("output = %q, want warning %q", output, wantWarning)
+	}
+
+	workspace, _ := outputPaths(modpack)
+	pendingPath := filepath.Join(workspace, "assets", "example", "lang", pendingTranslationFileName())
+	if got := string(mustRead(t, pendingPath)); got != "{\n  \"item.example.name\": \"Example Item\"\n}\n" {
+		t.Fatalf("pending = %q", got)
+	}
+
+	catalog := readCatalog(t, filepath.Join(workspace, "catalog", "catalog.v1.json"))
+	foundString := false
+	for _, entry := range catalog.Entries {
+		if entry.Source == "Example Item" {
+			foundString = true
+		}
+		if strings.Contains(entry.Source, "F2A6FF") || strings.Contains(entry.Source, "Example\",\"color") {
+			t.Fatalf("catalog entry stringified non-string source: %#v", entry)
+		}
+	}
+	if !foundString {
+		t.Fatalf("catalog entries = %#v, want string source", catalog.Entries)
+	}
+}
+
+func TestParseStandardLanguageAcceptsUTF8BOM(t *testing.T) {
+	got, err := parseStandardLanguage(append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{"key":"English"}`)...))
+	if err != nil {
+		t.Fatalf("parseStandardLanguage() error = %v", err)
+	}
+	if got.values["key"] != "English" || got.members != 1 {
+		t.Fatalf("parseStandardLanguage() = %#v", got)
+	}
+}
+
+func TestParseStandardLanguageAcceptsEmptyInput(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "empty", data: nil},
+		{name: "whitespace", data: []byte(" \n\t")},
+		{name: "BOM then whitespace", data: []byte{0xEF, 0xBB, 0xBF, ' ', '\n'}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseStandardLanguage(tt.data)
+			if err != nil {
+				t.Fatalf("parseStandardLanguage() error = %v", err)
+			}
+			if !got.empty || got.members != 0 || len(got.values) != 0 || len(got.duplicates) != 0 {
+				t.Fatalf("parseStandardLanguage() = %#v, want empty source", got)
+			}
+		})
+	}
+}
+
+func TestProcessModSkipsEmptyEnglishWithoutSkippingNamespaceTarget(t *testing.T) {
+	root := t.TempDir()
+	jarPath := filepath.Join(root, "mod.jar")
+	writeTestJar(t, jarPath, []zipEntry{
+		{"assets/example/lang/en_us.json", nil},
+		{"assets/example/lang/es_es.json", []byte(`{"translated":"Ya"}`)},
+	})
+	outputPath := filepath.Join(root, "pack")
+
+	output, err := captureStdout(t, func() error {
+		return processMod(jarPath, outputPath)
+	})
+	if err != nil {
+		t.Fatalf("processMod() error = %v", err)
+	}
+	for _, want := range []string{
+		"[SKIP] assets/example/lang/en_us.json: empty en_us.json",
+		"[OK] mod.jar/example: es_es.json existente",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want it to contain %q", output, want)
+		}
+	}
+	if strings.Contains(output, "mod.jar/example: sin es_es.json ni en_us.json") {
+		t.Fatalf("output = %q, empty source skipped the whole namespace", output)
+	}
+	assertAbsent(t, filepath.Join(outputPath, "assets", "example", "lang", pendingTranslationFileName()))
 }
 
 func TestRunSubtractsTargetKeysAcrossJarsRegardlessOfOrder(t *testing.T) {
@@ -846,16 +1023,12 @@ func TestRunLanguageAggregateLimitPreservesWorkspace(t *testing.T) {
 	}
 }
 
-func TestRunMalformedTargetOrOtherJarEnglishRollsBack(t *testing.T) {
+func TestRunMalformedOtherJarEnglishRollsBack(t *testing.T) {
 	for _, tt := range []struct {
 		name, file string
 		data       []byte
 		want       string
 	}{
-		{"malformed target", targetLanguageFileName(), []byte(`{"broken":`), "EOF"},
-		{"object target value", targetLanguageFileName(), []byte(`{"broken":{"nested":true}}`), `key "broken" must be a string`},
-		{"array target value", targetLanguageFileName(), []byte(`{"broken":["nested"]}`), `key "broken" must be a string`},
-		{"invalid UTF-8 target", targetLanguageFileName(), []byte{'{', '"', 0xff, '"', ':', '"', 'x', '"', '}'}, "file is not UTF-8"},
 		{"malformed other English", sourceLanguageFileName(), []byte(`{"broken":`), "EOF"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

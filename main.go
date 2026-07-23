@@ -403,6 +403,11 @@ type languageValue struct {
 	source string
 }
 
+type languageConflict struct {
+	first  string
+	second string
+}
+
 type namespaceLanguages struct {
 	targets map[string]bool
 	sources []languageSource
@@ -412,12 +417,15 @@ type languageSource struct {
 	jar        string
 	values     map[string]string
 	duplicates map[string]bool
+	nonStrings map[string]bool
 }
 
 type parsedSourceLanguage struct {
 	values     map[string]string
 	duplicates map[string]bool
+	nonStrings map[string]bool
 	members    int
+	empty      bool
 }
 
 type languageAggregator struct {
@@ -527,7 +535,8 @@ func (a *languageAggregator) addJar(jarPath string) error {
 		if language == targetLanguageFileName() {
 			keys, members, err := collectTargetLanguageKeys(data)
 			if err != nil {
-				return fmt.Errorf("parse %s in %s: %w", file.Name, filepath.Base(jarPath), err)
+				fmt.Printf("[WARN] %s/%s: ignoring malformed target %s: %v\n", filepath.Base(jarPath), namespace, file.Name, err)
+				continue
 			}
 			if err := a.budget.accountMembers(uint64(members), jarPath, file.Name); err != nil {
 				return err
@@ -537,6 +546,10 @@ func (a *languageAggregator) addJar(jarPath string) error {
 			source, err := parseStandardLanguage(data)
 			if err != nil {
 				return fmt.Errorf("parse %s in %s: %w", file.Name, filepath.Base(jarPath), err)
+			}
+			if source.empty {
+				fmt.Printf("[SKIP] %s: empty %s\n", file.Name, sourceLanguageFileName())
+				continue
 			}
 			if err := a.budget.accountMembers(uint64(source.members), jarPath, file.Name); err != nil {
 				return err
@@ -560,7 +573,7 @@ func (a *languageAggregator) addJar(jarPath string) error {
 			fmt.Printf("[OK] %s/%s: %s existente\n", filepath.Base(jarPath), namespace, targetLanguageFileName())
 		}
 		for _, source := range files.sources {
-			namespaceFiles.sources = append(namespaceFiles.sources, languageSource{jar: jarPath, values: source.values, duplicates: source.duplicates})
+			namespaceFiles.sources = append(namespaceFiles.sources, languageSource{jar: jarPath, values: source.values, duplicates: source.duplicates, nonStrings: source.nonStrings})
 		}
 		if len(files.targets) == 0 && len(files.sources) == 0 {
 			fmt.Printf("[SKIP] %s/%s: sin %s ni %s\n", filepath.Base(jarPath), namespace, targetLanguageFileName(), sourceLanguageFileName())
@@ -578,6 +591,10 @@ func parseStandardLanguage(data []byte) (parsedSourceLanguage, error) {
 	if !utf8.Valid(data) {
 		return parsedSourceLanguage{}, errors.New("file is not UTF-8")
 	}
+	data = trimUTF8BOM(data)
+	if strings.TrimSpace(string(data)) == "" {
+		return parsedSourceLanguage{empty: true}, nil
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	token, err := decoder.Token()
 	if err != nil {
@@ -586,7 +603,7 @@ func parseStandardLanguage(data []byte) (parsedSourceLanguage, error) {
 	if token != json.Delim('{') {
 		return parsedSourceLanguage{}, errors.New("root must be an object")
 	}
-	result := parsedSourceLanguage{values: make(map[string]string), duplicates: make(map[string]bool)}
+	result := parsedSourceLanguage{values: make(map[string]string), duplicates: make(map[string]bool), nonStrings: make(map[string]bool)}
 	for decoder.More() {
 		keyToken, err := decoder.Token()
 		if err != nil {
@@ -600,10 +617,6 @@ func parseStandardLanguage(data []byte) (parsedSourceLanguage, error) {
 		if err := decoder.Decode(&encoded); err != nil {
 			return parsedSourceLanguage{}, err
 		}
-		var value string
-		if err := json.Unmarshal(encoded, &value); err != nil {
-			return parsedSourceLanguage{}, fmt.Errorf("key %q must be a string", key)
-		}
 		result.members++
 		if result.members > maxCatalogMembers {
 			return parsedSourceLanguage{}, fmt.Errorf("object exceeds %d members", maxCatalogMembers)
@@ -614,6 +627,15 @@ func parseStandardLanguage(data []byte) (parsedSourceLanguage, error) {
 		if _, exists := result.values[key]; exists {
 			delete(result.values, key)
 			result.duplicates[key] = true
+			continue
+		}
+		if result.nonStrings[key] {
+			result.duplicates[key] = true
+			continue
+		}
+		var value string
+		if err := json.Unmarshal(encoded, &value); err != nil {
+			result.nonStrings[key] = true
 			continue
 		}
 		result.values[key] = value
@@ -631,6 +653,7 @@ func collectTargetLanguageKeys(data []byte) (map[string]bool, int, error) {
 	if !utf8.Valid(data) {
 		return nil, 0, errors.New("file is not UTF-8")
 	}
+	data = trimUTF8BOM(data)
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	token, err := decoder.Token()
 	if err != nil {
@@ -654,10 +677,6 @@ func collectTargetLanguageKeys(data []byte) (map[string]bool, int, error) {
 		if err := decoder.Decode(&raw); err != nil {
 			return nil, 0, err
 		}
-		var value string
-		if err := json.Unmarshal(raw, &value); err != nil {
-			return nil, 0, fmt.Errorf("key %q must be a string", key)
-		}
 		keys[key] = true
 		members++
 		if members > maxCatalogMembers {
@@ -671,6 +690,10 @@ func collectTargetLanguageKeys(data []byte) (map[string]bool, int, error) {
 		return nil, 0, err
 	}
 	return keys, members, nil
+}
+
+func trimUTF8BOM(data []byte) []byte {
+	return bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 }
 
 func (a *languageAggregator) publish() error {
@@ -694,8 +717,17 @@ func (a *languageAggregator) publish() error {
 			for _, key := range keys {
 				fmt.Printf("[WARN] %s/%s: duplicate source key %q skipped\n", filepath.Base(source.jar), namespace, key)
 			}
+			keys = make([]string, 0, len(source.nonStrings))
+			for key := range source.nonStrings {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				fmt.Printf("[WARN] %s/%s: non-string source key %q skipped\n", filepath.Base(source.jar), namespace, key)
+			}
 		}
 		merged := make(map[string]languageValue)
+		conflicts := make(map[string]languageConflict)
 		for _, source := range files.sources {
 			keys := make([]string, 0, len(source.values))
 			for key := range source.values {
@@ -706,16 +738,28 @@ func (a *languageAggregator) publish() error {
 				value := source.values[key]
 				if existing, ok := merged[key]; ok {
 					if existing.value != value {
-						return fmt.Errorf("namespace %q translation key %q conflicts between JARs %q and %q", namespace, key, filepath.Base(existing.source), filepath.Base(source.jar))
+						if _, reported := conflicts[key]; !reported {
+							conflicts[key] = languageConflict{first: existing.source, second: source.jar}
+						}
 					}
 					continue
 				}
 				merged[key] = languageValue{value: value, source: source.jar}
 			}
 		}
+		conflictKeys := make([]string, 0, len(conflicts))
+		for key := range conflicts {
+			conflictKeys = append(conflictKeys, key)
+		}
+		sort.Strings(conflictKeys)
+		for _, key := range conflictKeys {
+			conflict := conflicts[key]
+			fmt.Printf("[WARN] namespace %q translation key %q conflicts between JARs %q and %q; key skipped\n", namespace, key, filepath.Base(conflict.first), filepath.Base(conflict.second))
+		}
 		values := make(map[string]string, len(merged))
 		for key, entry := range merged {
-			if a.refresh || !files.targets[key] {
+			_, conflict := conflicts[key]
+			if !conflict && (a.refresh || !files.targets[key]) {
 				values[key] = entry.value
 			}
 		}
