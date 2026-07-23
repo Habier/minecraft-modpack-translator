@@ -29,27 +29,90 @@ const (
 var zipModTime = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func Workspace(modpackPath string) (string, error) {
-	root := filepath.Join(modpackPath, OutputDirectory)
-	workspace := filepath.Join(root, "workspace")
-	exportPack := filepath.Join(root, "export", "overrides", "resourcepacks", ResourcePackName)
-	exportOverrides := filepath.Join(root, "export", "overrides")
-	zipPath := ZipPath(modpackPath)
+	paths := newWritebackPaths(modpackPath)
 	if err := RemoveStaleZip(modpackPath); err != nil {
 		return "", err
 	}
 
-	catalogPath := filepath.Join(workspace, "catalog", "catalog.v1.json")
-	cachePath := filepath.Join(workspace, "translations", "translations.v2.json")
+	plan, err := loadWritebackPlan(paths)
+	if err != nil {
+		return "", err
+	}
+	if err := writeStandardLang(paths.exportPack, plan.standardLang); err != nil {
+		return "", err
+	}
+	if err := writeKubeJSLang(paths.workspace, paths.exportOverrides, plan.kubeJSLang); err != nil {
+		return "", err
+	}
+	if err := writeFTBQuests(paths.workspace, paths.exportOverrides, plan.ftbQuestSNBT); err != nil {
+		return "", err
+	}
+	if len(plan.patchouli) > 0 {
+		if err := writePatchouli(paths.workspace, paths.exportPack, plan.patchouli, plan.translated); err != nil {
+			return "", fmt.Errorf("writing Patchouli files: %w", err)
+		}
+	}
+
+	if err := createOverridesZip(paths.exportOverrides, paths.zipPath); err != nil {
+		return "", fmt.Errorf("creating ZIP: %w", err)
+	}
+	fmt.Printf("\nShareable ZIP: %s\n", paths.zipPath)
+	fmt.Println("\nDone. To use in Minecraft:")
+	fmt.Println("  1. Share or extract the ZIP into the Minecraft instance root:")
+	fmt.Println("     " + paths.zipPath)
+	fmt.Println("  2. Enable 'ModpackTranslations' in-game (Options > Resource Packs)")
+	return paths.zipPath, nil
+}
+
+func ZipPath(modpackPath string) string {
+	return filepath.Join(modpackPath, OutputDirectory, "export", ZipName)
+}
+
+func RemoveStaleZip(modpackPath string) error {
+	if err := os.Remove(ZipPath(modpackPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("removing stale ZIP: %w", err)
+	}
+	return nil
+}
+
+type writebackPaths struct {
+	workspace       string
+	exportPack      string
+	exportOverrides string
+	zipPath         string
+}
+
+func newWritebackPaths(modpackPath string) writebackPaths {
+	root := filepath.Join(modpackPath, OutputDirectory)
+	return writebackPaths{
+		workspace:       filepath.Join(root, "workspace"),
+		exportPack:      filepath.Join(root, "export", "overrides", "resourcepacks", ResourcePackName),
+		exportOverrides: filepath.Join(root, "export", "overrides"),
+		zipPath:         ZipPath(modpackPath),
+	}
+}
+
+type writebackPlan struct {
+	translated   map[string]string
+	standardLang map[string]map[string]string
+	kubeJSLang   map[string]map[string]string
+	patchouli    []patchouliWriteback
+	ftbQuestSNBT map[string]ftbEntry
+}
+
+func loadWritebackPlan(paths writebackPaths) (writebackPlan, error) {
+	catalogPath := filepath.Join(paths.workspace, "catalog", "catalog.v1.json")
+	cachePath := filepath.Join(paths.workspace, "translations", "translations.v2.json")
 
 	catalog, err := loadCatalog(catalogPath)
 	if err != nil {
-		return "", fmt.Errorf("loading catalog: %w", err)
+		return writebackPlan{}, fmt.Errorf("loading catalog: %w", err)
 	}
 	fmt.Printf("Catalog: %d entries\n", len(catalog.Entries))
 
 	cache, err := loadTranslationCache(cachePath)
 	if err != nil {
-		return "", fmt.Errorf("loading translations: %w", err)
+		return writebackPlan{}, fmt.Errorf("loading translations: %w", err)
 	}
 	fmt.Printf("Translations: %d entries\n", len(cache.Entries))
 
@@ -58,22 +121,13 @@ func Workspace(modpackPath string) (string, error) {
 		translated[entry.ID] = entry.Translation
 	}
 
-	type stdLangEntry struct {
-		namespace string
-		key       string
+	plan := writebackPlan{
+		translated:   translated,
+		standardLang: make(map[string]map[string]string),
+		kubeJSLang:   make(map[string]map[string]string),
+		ftbQuestSNBT: make(map[string]ftbEntry),
 	}
-
-	var (
-		stdLang      []stdLangEntry
-		kubeJSLang   map[string]map[string]string
-		patchouli    []patchouliWriteback
-		ftbQuestSNBT map[string]ftbEntry
-		skipped      int
-		matched      int
-	)
-
-	kubeJSLang = make(map[string]map[string]string)
-	ftbQuestSNBT = make(map[string]ftbEntry)
+	var skipped, matched int
 
 	for _, entry := range catalog.Entries {
 		translation, ok := translated[entry.ID]
@@ -91,17 +145,20 @@ func Workspace(modpackPath string) (string, error) {
 				continue
 			}
 			key := pointerKey(entry.Locator)
-			stdLang = append(stdLang, stdLangEntry{namespace: ns, key: key})
+			if plan.standardLang[ns] == nil {
+				plan.standardLang[ns] = make(map[string]string)
+			}
+			plan.standardLang[ns][key] = translation
 
 		case "kubejs_lang":
 			key := pointerKey(entry.Locator)
-			if kubeJSLang[entry.SourceFile] == nil {
-				kubeJSLang[entry.SourceFile] = make(map[string]string)
+			if plan.kubeJSLang[entry.SourceFile] == nil {
+				plan.kubeJSLang[entry.SourceFile] = make(map[string]string)
 			}
-			kubeJSLang[entry.SourceFile][key] = translation
+			plan.kubeJSLang[entry.SourceFile][key] = translation
 
 		case "patchouli":
-			patchouli = append(patchouli, patchouliWriteback{
+			plan.patchouli = append(plan.patchouli, patchouliWriteback{
 				id:         entry.ID,
 				sourceFile: entry.SourceFile,
 				locator:    entry.Locator,
@@ -111,14 +168,14 @@ func Workspace(modpackPath string) (string, error) {
 
 		case "ftbquests_snbt", "ftbquests_json5":
 			sf := entry.SourceFile
-			if _, exists := ftbQuestSNBT[sf]; !exists {
-				ftbQuestSNBT[sf] = ftbEntry{
+			if _, exists := plan.ftbQuestSNBT[sf]; !exists {
+				plan.ftbQuestSNBT[sf] = ftbEntry{
 					sourceFile: sf,
 					format:     entry.Writeback.Format,
 					fields:     make(map[string]fieldInfo),
 				}
 			}
-			fe := ftbQuestSNBT[sf]
+			fe := plan.ftbQuestSNBT[sf]
 			fe.fields[entry.Locator] = fieldInfo{
 				source:      entry.Source,
 				translation: translation,
@@ -127,44 +184,23 @@ func Workspace(modpackPath string) (string, error) {
 				arrayIndex:  entry.Writeback.ArrayIndex,
 				sourceHash:  entry.Writeback.SourceSHA256,
 			}
-			ftbQuestSNBT[sf] = fe
+			plan.ftbQuestSNBT[sf] = fe
 		}
 	}
 
 	fmt.Printf("  Matched: %d, Skipped (no translation): %d\n", matched, skipped)
 	fmt.Printf("  Standard lang namespaces: need to resolve\n")
-	fmt.Printf("  KubeJS lang files: %d\n", len(kubeJSLang))
-	fmt.Printf("  Patchouli entries: %d\n", len(patchouli))
-	fmt.Printf("  FTB Quests files: %d\n", len(ftbQuestSNBT))
+	fmt.Printf("  KubeJS lang files: %d\n", len(plan.kubeJSLang))
+	fmt.Printf("  Patchouli entries: %d\n", len(plan.patchouli))
+	fmt.Printf("  FTB Quests files: %d\n", len(plan.ftbQuestSNBT))
 	if skipped > 0 {
-		return "", fmt.Errorf("translation coverage is incomplete: %d of %d catalog entries are missing translations; ZIP was not created", skipped, len(catalog.Entries))
+		return writebackPlan{}, fmt.Errorf("translation coverage is incomplete: %d of %d catalog entries are missing translations; ZIP was not created", skipped, len(catalog.Entries))
 	}
 
-	nsGroups := make(map[string]map[string]string)
-	for _, entry := range stdLang {
-		if nsGroups[entry.namespace] == nil {
-			nsGroups[entry.namespace] = make(map[string]string)
-		}
-	}
-	for _, entry := range catalog.Entries {
-		if entry.SourceKind != "standard_lang" {
-			continue
-		}
-		translation, ok := translated[entry.ID]
-		if !ok {
-			continue
-		}
-		ns := extractNamespace(entry.SourceFile)
-		if ns == "" {
-			continue
-		}
-		key := pointerKey(entry.Locator)
-		if nsGroups[ns] == nil {
-			nsGroups[ns] = make(map[string]string)
-		}
-		nsGroups[ns][key] = translation
-	}
+	return plan, nil
+}
 
+func writeStandardLang(exportPack string, nsGroups map[string]map[string]string) error {
 	nsList := make([]string, 0, len(nsGroups))
 	for ns := range nsGroups {
 		nsList = append(nsList, ns)
@@ -174,115 +210,97 @@ func Workspace(modpackPath string) (string, error) {
 	for _, ns := range nsList {
 		dir := filepath.Join(exportPack, "assets", ns, "lang")
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return "", fmt.Errorf("creating standard language directory %s: %w", dir, err)
+			return fmt.Errorf("creating standard language directory %s: %w", dir, err)
 		}
 		path := filepath.Join(dir, TargetLang+".json")
 		values := nsGroups[ns]
 		data, err := json.MarshalIndent(values, "", "  ")
 		if err != nil {
-			return "", fmt.Errorf("marshaling standard language file %s: %w", path, err)
+			return fmt.Errorf("marshaling standard language file %s: %w", path, err)
 		}
 		data = append(data, '\n')
 		if err := os.WriteFile(path, data, 0644); err != nil {
-			return "", fmt.Errorf("writing standard language file %s: %w", path, err)
+			return fmt.Errorf("writing standard language file %s: %w", path, err)
 		}
 		fmt.Printf("  [LANG] %s: %d keys -> %s\n", ns, len(values), path)
 	}
-
-	if len(kubeJSLang) > 0 {
-		sourceFiles := make([]string, 0, len(kubeJSLang))
-		for sourceFile := range kubeJSLang {
-			sourceFiles = append(sourceFiles, sourceFile)
-		}
-		sort.Strings(sourceFiles)
-		for _, sourceFile := range sourceFiles {
-			values := kubeJSLang[sourceFile]
-			srcPath := filepath.Join(workspace, filepath.FromSlash(sourceFile))
-			data, err := os.ReadFile(srcPath)
-			if err != nil {
-				return "", fmt.Errorf("reading KubeJS language source %s: %w", srcPath, err)
-			}
-			keys, err := orderedJSONKeys(data)
-			if err != nil {
-				return "", fmt.Errorf("reading KubeJS language key order from %s: %w", srcPath, err)
-			}
-			ns := kubeJSNamespace(sourceFile)
-			if ns == "" {
-				return "", fmt.Errorf("cannot extract KubeJS namespace from %q", sourceFile)
-			}
-			path := filepath.Join(exportOverrides, "kubejs", "assets", ns, "lang", TargetLang+".json")
-			out, err := marshalOrderedStringObject(keys, values)
-			if err != nil {
-				return "", fmt.Errorf("marshaling KubeJS language file %s: %w", path, err)
-			}
-			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-				return "", fmt.Errorf("creating KubeJS language directory %s: %w", filepath.Dir(path), err)
-			}
-			if err := os.WriteFile(path, out, 0644); err != nil {
-				return "", fmt.Errorf("writing KubeJS language file %s: %w", path, err)
-			}
-			fmt.Printf("  [KUBEJS] %s: %d keys -> %s\n", ns, len(values), path)
-		}
-	}
-
-	if len(ftbQuestSNBT) > 0 {
-		sfList := make([]string, 0, len(ftbQuestSNBT))
-		for sf := range ftbQuestSNBT {
-			sfList = append(sfList, sf)
-		}
-		sort.Strings(sfList)
-
-		for _, sf := range sfList {
-			fe := ftbQuestSNBT[sf]
-			rel := strings.TrimPrefix(sf, "sources/ftbquests/")
-			rel = strings.TrimPrefix(rel, "/")
-			srcPath := filepath.Join(workspace, filepath.FromSlash(sf))
-			exportPath := filepath.Join(exportOverrides, filepath.FromSlash(rel))
-
-			data, err := os.ReadFile(srcPath)
-			if err != nil {
-				return "", fmt.Errorf("reading FTB Quests source %s: %w", srcPath, err)
-			}
-
-			content, err := applyFTBWriteback(data, fe)
-			if err != nil {
-				return "", err
-			}
-
-			if err := os.MkdirAll(filepath.Dir(exportPath), 0755); err != nil {
-				return "", fmt.Errorf("creating FTB Quests directory for %s: %w", exportPath, err)
-			}
-			if err := os.WriteFile(exportPath, content, 0644); err != nil {
-				return "", fmt.Errorf("writing FTB Quests file %s: %w", exportPath, err)
-			}
-			fmt.Printf("  [FTB] %s -> %s\n", filepath.Base(sf), exportPath)
-		}
-	}
-
-	if len(patchouli) > 0 {
-		if err := writePatchouli(workspace, exportPack, patchouli, translated); err != nil {
-			return "", fmt.Errorf("writing Patchouli files: %w", err)
-		}
-	}
-
-	if err := createOverridesZip(exportOverrides, zipPath); err != nil {
-		return "", fmt.Errorf("creating ZIP: %w", err)
-	}
-	fmt.Printf("\nShareable ZIP: %s\n", zipPath)
-	fmt.Println("\nDone. To use in Minecraft:")
-	fmt.Println("  1. Share or extract the ZIP into the Minecraft instance root:")
-	fmt.Println("     " + zipPath)
-	fmt.Println("  2. Enable 'ModpackTranslations' in-game (Options > Resource Packs)")
-	return zipPath, nil
+	return nil
 }
 
-func ZipPath(modpackPath string) string {
-	return filepath.Join(modpackPath, OutputDirectory, "export", ZipName)
+func writeKubeJSLang(workspace, exportOverrides string, kubeJSLang map[string]map[string]string) error {
+	if len(kubeJSLang) == 0 {
+		return nil
+	}
+	sourceFiles := make([]string, 0, len(kubeJSLang))
+	for sourceFile := range kubeJSLang {
+		sourceFiles = append(sourceFiles, sourceFile)
+	}
+	sort.Strings(sourceFiles)
+	for _, sourceFile := range sourceFiles {
+		values := kubeJSLang[sourceFile]
+		srcPath := filepath.Join(workspace, filepath.FromSlash(sourceFile))
+		data, err := os.ReadFile(srcPath)
+		if err != nil {
+			return fmt.Errorf("reading KubeJS language source %s: %w", srcPath, err)
+		}
+		keys, err := orderedJSONKeys(data)
+		if err != nil {
+			return fmt.Errorf("reading KubeJS language key order from %s: %w", srcPath, err)
+		}
+		ns := kubeJSNamespace(sourceFile)
+		if ns == "" {
+			return fmt.Errorf("cannot extract KubeJS namespace from %q", sourceFile)
+		}
+		path := filepath.Join(exportOverrides, "kubejs", "assets", ns, "lang", TargetLang+".json")
+		out, err := marshalOrderedStringObject(keys, values)
+		if err != nil {
+			return fmt.Errorf("marshaling KubeJS language file %s: %w", path, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			return fmt.Errorf("creating KubeJS language directory %s: %w", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, out, 0644); err != nil {
+			return fmt.Errorf("writing KubeJS language file %s: %w", path, err)
+		}
+		fmt.Printf("  [KUBEJS] %s: %d keys -> %s\n", ns, len(values), path)
+	}
+	return nil
 }
 
-func RemoveStaleZip(modpackPath string) error {
-	if err := os.Remove(ZipPath(modpackPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("removing stale ZIP: %w", err)
+func writeFTBQuests(workspace, exportOverrides string, ftbQuestSNBT map[string]ftbEntry) error {
+	if len(ftbQuestSNBT) == 0 {
+		return nil
+	}
+	sfList := make([]string, 0, len(ftbQuestSNBT))
+	for sf := range ftbQuestSNBT {
+		sfList = append(sfList, sf)
+	}
+	sort.Strings(sfList)
+
+	for _, sf := range sfList {
+		fe := ftbQuestSNBT[sf]
+		rel := strings.TrimPrefix(sf, "sources/ftbquests/")
+		rel = strings.TrimPrefix(rel, "/")
+		srcPath := filepath.Join(workspace, filepath.FromSlash(sf))
+		exportPath := filepath.Join(exportOverrides, filepath.FromSlash(rel))
+
+		data, err := os.ReadFile(srcPath)
+		if err != nil {
+			return fmt.Errorf("reading FTB Quests source %s: %w", srcPath, err)
+		}
+
+		content, err := applyFTBWriteback(data, fe)
+		if err != nil {
+			return err
+		}
+
+		if err := os.MkdirAll(filepath.Dir(exportPath), 0755); err != nil {
+			return fmt.Errorf("creating FTB Quests directory for %s: %w", exportPath, err)
+		}
+		if err := os.WriteFile(exportPath, content, 0644); err != nil {
+			return fmt.Errorf("writing FTB Quests file %s: %w", exportPath, err)
+		}
+		fmt.Printf("  [FTB] %s -> %s\n", filepath.Base(sf), exportPath)
 	}
 	return nil
 }
