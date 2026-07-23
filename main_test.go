@@ -644,6 +644,33 @@ func TestCreateCentralKitchenDuplicateTargetFixture(t *testing.T) {
 	}
 }
 
+func TestLanguageFileRejectsUnsafeArchivePaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "backslashes", path: `assets\example\lang\en_us.json`},
+		{name: "absolute path", path: "/assets/example/lang/en_us.json"},
+		{name: "drive qualified", path: "C:/assets/example/lang/en_us.json"},
+		{name: "drive relative", path: "C:assets/example/lang/en_us.json"},
+		{name: "parent traversal", path: "../assets/example/lang/en_us.json"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if namespace, language, ok := languageFile(tt.path); ok {
+				t.Fatalf("languageFile(%q) = %q, %q, true; want rejected", tt.path, namespace, language)
+			}
+		})
+	}
+}
+
+func TestLanguageFileAcceptsCanonicalRelativeArchivePath(t *testing.T) {
+	namespace, language, ok := languageFile("assets/example/lang/en_us.json")
+	if !ok || namespace != "example" || language != "en_us.json" {
+		t.Fatalf("languageFile() = %q, %q, %v; want example, en_us.json, true", namespace, language, ok)
+	}
+}
+
 func TestRunMalformedSameJarEnglishRollsBack(t *testing.T) {
 	modpack, jar := testModpack(t)
 	writeTestJar(t, jar, []zipEntry{{"assets/previous/lang/en_us.json", []byte(`{"old":"complete"}`)}})

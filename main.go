@@ -190,7 +190,7 @@ func removePendingExportFiles(exportPackPath string) error {
 		if err != nil {
 			return err
 		}
-		_, language, isLanguageFile := languageFile(relativePath)
+		_, language, isLanguageFile := languageFile(filepath.ToSlash(relativePath))
 		if isLanguageFile && language == pendingTranslationFileName() {
 			if err := os.Remove(path); err != nil {
 				return fmt.Errorf("eliminar archivo pendiente obsoleto del export: %w", err)
@@ -498,7 +498,11 @@ func (a *languageAggregator) addJar(jarPath string) error {
 	byNamespace := make(map[string]*jarLanguages)
 
 	for _, file := range reader.File {
-		namespace, language, ok := languageFile(file.Name)
+		entryName, err := safeArchivePath(file.Name)
+		if err != nil {
+			return fmt.Errorf("unsafe language JAR entry %q in %s: %w", file.Name, filepath.Base(jarPath), err)
+		}
+		namespace, language, ok := languageFile(entryName)
 		if !ok {
 			continue
 		}
@@ -732,7 +736,11 @@ func (a *languageAggregator) publish() error {
 }
 
 func languageFile(path string) (namespace, language string, ok bool) {
-	parts := strings.Split(strings.ReplaceAll(path, "\\", "/"), "/")
+	path, err := safeArchivePath(path)
+	if err != nil {
+		return "", "", false
+	}
+	parts := strings.Split(path, "/")
 	if len(parts) != 4 || parts[0] != "assets" || parts[1] == "" || parts[2] != "lang" {
 		return "", "", false
 	}

@@ -98,6 +98,7 @@ func TestPatchouliJarRejectsUnsafeEntries(t *testing.T) {
 		{name: "parent traversal", entryName: "../escape.json"},
 		{name: "absolute path", entryName: "/escape.json"},
 		{name: "drive qualified", entryName: "C:/escape.json"},
+		{name: "drive relative", entryName: "C:escape.json"},
 		{name: "backslash traversal", entryName: `..\escape.json`},
 		{name: "ZIP symlink", entryName: "assets/a/patchouli_books/b/en_us/entries/link.json", symlink: true},
 	}

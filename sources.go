@@ -354,7 +354,7 @@ func readLimitedZipFile(file *zip.File) ([]byte, error) {
 }
 
 func safeArchivePath(name string) (string, error) {
-	if name == "" || strings.Contains(name, "\\") || strings.HasPrefix(name, "/") || filepath.IsAbs(name) || filepath.VolumeName(name) != "" {
+	if name == "" || strings.Contains(name, "\\") || strings.HasPrefix(name, "/") || filepath.IsAbs(name) || filepath.VolumeName(name) != "" || hasWindowsDrivePrefix(name) {
 		return "", errors.New("absolute, drive-qualified, and backslash paths are not allowed")
 	}
 	clean := path.Clean(name)
@@ -362,6 +362,14 @@ func safeArchivePath(name string) (string, error) {
 		return "", errors.New("non-canonical or parent path is not allowed")
 	}
 	return strings.TrimSuffix(clean, "/"), nil
+}
+
+func hasWindowsDrivePrefix(name string) bool {
+	if len(name) < 2 || name[1] != ':' {
+		return false
+	}
+	drive := name[0]
+	return drive >= 'A' && drive <= 'Z' || drive >= 'a' && drive <= 'z'
 }
 
 func sanitizedSourceName(name string) string {
