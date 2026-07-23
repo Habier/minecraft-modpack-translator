@@ -142,40 +142,42 @@ Windows SmartScreen may warn if the binary is not code-signed. Only allow it aft
 
 ## Translation providers
 
-Provider order:
+Provider order is configured with `PROVIDER_CHAIN`. Each non-`ollama` entry is treated as an OpenAI-compatible provider.
 
-```text
-Gemini -> Cerebras -> Groq -> Mistral -> OpenRouter -> Ollama (local fallback)
-```
-
-Cloud providers are optional. A cloud provider is enabled only when its API key is configured. Each enabled cloud provider also needs a model name.
-
-If no cloud provider is configured, the tool uses local Ollama.
+If `PROVIDER_CHAIN` is unset, the tool uses local Ollama only. This is a breaking change from older releases that looked for named cloud provider variables automatically.
 
 ### Configure cloud providers
 
 Create a `.env` file beside the compiled binary, or set variables in your terminal.
 
-Common `.env` entries:
+Example `.env` entries:
 
 ```text
-GEMINI_API_KEY=<gemini-api-key>
-GEMINI_MODEL=<model-supporting-structured-output>
+PROVIDER_CHAIN=deepinfra,together,ollama
 
-CEREBRAS_API_KEY=<cerebras-api-key>
-CEREBRAS_MODEL=qwen-3-32b
+PROVIDER_DEEPINFRA_BASE_URL=https://api.deepinfra.com/v1/openai
+PROVIDER_DEEPINFRA_API_KEY=<deepinfra-api-key>
+PROVIDER_DEEPINFRA_MODEL=<model-supporting-structured-output>
+PROVIDER_DEEPINFRA_MODE=json_schema
 
-GROQ_API_KEY=<groq-api-key>
-GROQ_MODEL=<model-supporting-json-mode>
-
-MISTRAL_API_KEY=<mistral-api-key>
-MISTRAL_MODEL=<model-supporting-structured-output>
-
-OPENROUTER_API_KEY=<openrouter-api-key>
-OPENROUTER_MODEL=<provider/model-supporting-structured-output>
+PROVIDER_TOGETHER_BASE_URL=https://api.together.xyz/v1
+PROVIDER_TOGETHER_API_KEY=<together-api-key>
+PROVIDER_TOGETHER_MODEL=<model-supporting-json-mode>
+PROVIDER_TOGETHER_MODE=json_object
 ```
 
-Only fill the providers you want to use. Keep `.env` private; it is plain text.
+Provider names may contain letters, numbers, underscores, and hyphens. For env variables, names are uppercased and hyphens become underscores. For example, `together-ai` uses `PROVIDER_TOGETHER_AI_BASE_URL`, `PROVIDER_TOGETHER_AI_API_KEY`, `PROVIDER_TOGETHER_AI_MODEL`, and `PROVIDER_TOGETHER_AI_MODE`.
+
+Each configured cloud provider requires:
+
+| Variable suffix | Purpose |
+|---|---|
+| `BASE_URL` | HTTPS OpenAI-compatible base URL, without credentials, query, or fragment |
+| `API_KEY` | Provider API key |
+| `MODEL` | Model to use |
+| `MODE` | `json_schema` or `json_object` |
+
+Keep `.env` private; it is plain text.
 
 ### Use local Ollama
 
@@ -198,6 +200,8 @@ Useful Ollama variables:
 | `OLLAMA_TIMEOUT` | `30m` | Per-request timeout |
 
 The selected model must already exist in Ollama. Modpack Translator does not download models automatically.
+
+Ollama is used only when `ollama` appears in `PROVIDER_CHAIN`, or when `PROVIDER_CHAIN` is unset.
 
 ## Extraction-only mode
 

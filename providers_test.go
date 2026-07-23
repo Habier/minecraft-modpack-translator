@@ -14,98 +14,137 @@ import (
 	"time"
 )
 
-func TestProviderProfilesFromEnvOrderAndValidation(t *testing.T) {
-	env := map[string]string{
-		"GEMINI_API_KEY": "gem-secret", "GEMINI_MODEL": "gem-model",
-		"CEREBRAS_API_KEY": "cer-secret", "CEREBRAS_MODEL": "cer-model",
-		"GROQ_API_KEY": "groq-secret", "GROQ_MODEL": "groq-model",
-		"MISTRAL_API_KEY": "mis-secret", "MISTRAL_MODEL": "mis-model",
-		"OPENROUTER_API_KEY": "or-secret", "OPENROUTER_MODEL": "or-model",
-	}
-	profiles, err := providerProfilesFromEnv(func(name string) string { return env[name] })
-	if err != nil || len(profiles) != 5 {
+func TestProviderProfilesFromEnvDefaultChainUsesOllamaOnly(t *testing.T) {
+	profiles, err := providerProfilesFromEnv(func(string) string { return "" })
+	if err != nil || len(profiles) != 0 {
 		t.Fatalf("profiles=%#v error=%v", profiles, err)
 	}
-	var names []string
-	for _, profile := range profiles {
-		names = append(names, profile.Name)
-	}
-	if got := strings.Join(names, ","); got != "gemini,cerebras,groq,mistral,openrouter" {
-		t.Fatalf("provider order=%s", got)
-	}
-	for _, invalid := range []string{"http://example.test/v1", "https://user:pass@example.test/v1", "https://example.test/v1?key=secret", "https://example.test/v1#fragment"} {
-		env["GEMINI_BASE_URL"] = invalid
-		_, err := providerProfilesFromEnv(func(name string) string { return env[name] })
-		if err == nil || strings.Contains(err.Error(), "gem-secret") {
-			t.Fatalf("invalid URL %q error=%v", invalid, err)
-		}
-	}
-	delete(env, "GEMINI_BASE_URL")
-	delete(env, "GEMINI_MODEL")
-	if _, err := providerProfilesFromEnv(func(name string) string { return env[name] }); err == nil || !strings.Contains(err.Error(), "GEMINI_MODEL") {
-		t.Fatalf("missing model error=%v", err)
-	}
-	delete(env, "GEMINI_API_KEY")
-	delete(env, "CEREBRAS_MODEL")
-	if _, err := providerProfilesFromEnv(func(name string) string { return env[name] }); err == nil || !strings.Contains(err.Error(), "CEREBRAS_MODEL") {
-		t.Fatalf("missing Cerebras model error=%v", err)
-	}
-}
-
-func TestCerebrasRequiresOfficialHostWithoutLeakingKey(t *testing.T) {
-	env := map[string]string{"CEREBRAS_API_KEY": "cer-secret", "CEREBRAS_MODEL": "model", "CEREBRAS_BASE_URL": "https://api.cerebras.ai/v1"}
-	if profiles, err := providerProfilesFromEnv(func(name string) string { return env[name] }); err != nil || len(profiles) != 1 {
-		t.Fatalf("official host profiles=%#v error=%v", profiles, err)
-	}
-	env["CEREBRAS_BASE_URL"] = "https://attacker.example/v1"
-	_, err := providerProfilesFromEnv(func(name string) string { return env[name] })
-	if err == nil || strings.Contains(err.Error(), env["CEREBRAS_API_KEY"]) {
-		t.Fatalf("arbitrary host error=%v", err)
-	}
-}
-
-func TestBuildTranslatorChainExactOrder(t *testing.T) {
-	env := map[string]string{
-		"GEMINI_API_KEY": "g", "GEMINI_MODEL": "gm",
-		"CEREBRAS_API_KEY": "c", "CEREBRAS_MODEL": "cm",
-		"GROQ_API_KEY": "q", "GROQ_MODEL": "qm",
-		"MISTRAL_API_KEY": "m", "MISTRAL_MODEL": "mm",
-		"OPENROUTER_API_KEY": "o", "OPENROUTER_MODEL": "om",
-	}
-	translator, _, err := buildTranslatorChain(func(name string) string { return env[name] })
+	translator, model, err := buildTranslatorChain(func(string) string { return "" })
 	if err != nil {
 		t.Fatal(err)
 	}
-	chain := translator.(*chainTranslator)
-	var names []string
-	for _, provider := range chain.providers {
-		switch typed := provider.(type) {
-		case *openAITranslator:
-			names = append(names, typed.profile.Name)
-		case *ollamaTranslator:
-			names = append(names, "ollama")
-		default:
-			t.Fatalf("unexpected provider %T", provider)
-		}
+	if got := providerNames(translator); got != "ollama" || model != defaultOllamaModel {
+		t.Fatalf("chain=%s model=%s", got, model)
 	}
-	if got := strings.Join(names, ","); got != "gemini,cerebras,groq,mistral,openrouter,ollama" {
-		t.Fatalf("provider order=%s", got)
+}
+
+func TestProviderProfilesFromEnvCustomProviderParsing(t *testing.T) {
+	env := map[string]string{
+		"PROVIDER_CHAIN":                "deepinfra,together-ai",
+		"PROVIDER_DEEPINFRA_BASE_URL":   "https://api.deepinfra.com/v1/openai/",
+		"PROVIDER_DEEPINFRA_API_KEY":    "deep-secret",
+		"PROVIDER_DEEPINFRA_MODEL":      "deep-model",
+		"PROVIDER_DEEPINFRA_MODE":       "json_schema",
+		"PROVIDER_TOGETHER_AI_BASE_URL": "https://api.together.xyz/v1",
+		"PROVIDER_TOGETHER_AI_API_KEY":  "together-secret",
+		"PROVIDER_TOGETHER_AI_MODEL":    "together-model",
+		"PROVIDER_TOGETHER_AI_MODE":     "json_object",
+	}
+	profiles, err := providerProfilesFromEnv(func(name string) string { return env[name] })
+	if err != nil || len(profiles) != 2 {
+		t.Fatalf("profiles=%#v error=%v", profiles, err)
+	}
+	if profiles[0].Name != "deepinfra" || profiles[0].BaseURL.String() != "https://api.deepinfra.com/v1/openai" || profiles[0].Mode != modeJSONSchema {
+		t.Fatalf("deepinfra profile=%#v", profiles[0])
+	}
+	if profiles[1].Name != "together-ai" || profiles[1].Mode != modeJSONObject {
+		t.Fatalf("together profile=%#v", profiles[1])
+	}
+}
+
+func TestBuildTranslatorChainPreservesConfiguredOrder(t *testing.T) {
+	env := providerChainEnv("together,deepinfra,ollama")
+	translator, model, err := buildTranslatorChain(func(name string) string { return env[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := providerNames(translator); got != "together,deepinfra,ollama" || model != defaultOllamaModel {
+		t.Fatalf("chain=%s model=%s", got, model)
+	}
+}
+
+func TestProviderProfilesFromEnvMissingRequiredFields(t *testing.T) {
+	tests := []struct {
+		name, missing, want string
+	}{
+		{"base URL", "PROVIDER_DEEPINFRA_BASE_URL", "PROVIDER_DEEPINFRA_BASE_URL"},
+		{"API key", "PROVIDER_DEEPINFRA_API_KEY", "PROVIDER_DEEPINFRA_API_KEY"},
+		{"model", "PROVIDER_DEEPINFRA_MODEL", "PROVIDER_DEEPINFRA_MODEL"},
+		{"mode", "PROVIDER_DEEPINFRA_MODE", "PROVIDER_DEEPINFRA_MODE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := providerChainEnv("deepinfra")
+			delete(env, tt.missing)
+			_, err := providerProfilesFromEnv(func(name string) string { return env[name] })
+			if err == nil || !strings.Contains(err.Error(), tt.want) || strings.Contains(err.Error(), "deep-secret") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestProviderProfilesFromEnvInvalidBaseURLRejected(t *testing.T) {
+	for _, invalid := range []string{"http://example.test/v1", "https://user:pass@example.test/v1", "https://example.test/v1?key=secret", "https://example.test/v1#fragment", "https://example.test/v1\n"} {
+		t.Run(invalid, func(t *testing.T) {
+			env := providerChainEnv("deepinfra")
+			env["PROVIDER_DEEPINFRA_BASE_URL"] = invalid
+			_, err := providerProfilesFromEnv(func(name string) string { return env[name] })
+			if err == nil || strings.Contains(err.Error(), env["PROVIDER_DEEPINFRA_API_KEY"]) {
+				t.Fatalf("invalid URL %q error=%v", invalid, err)
+			}
+		})
+	}
+}
+
+func TestProviderChainInvalidAndDuplicateNamesRejected(t *testing.T) {
+	tests := []struct {
+		chain, want string
+	}{
+		{"deepinfra,,ollama", "empty provider name"},
+		{"deepinfra,deepinfra", "duplicate"},
+		{"together-ai,together_ai", "duplicate"},
+		{"deepinfra.example", "invalid"},
+		{"bad\nname", "control characters"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.chain, func(t *testing.T) {
+			env := map[string]string{"PROVIDER_CHAIN": tt.chain}
+			_, err := providerProfilesFromEnv(func(name string) string { return env[name] })
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestBuildTranslatorChainIncludesOllamaOnlyWhenPresent(t *testing.T) {
+	env := providerChainEnv("deepinfra")
+	translator, model, err := buildTranslatorChain(func(name string) string { return env[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := providerNames(translator); got != "deepinfra" || model != "deep-model" {
+		t.Fatalf("chain=%s model=%s", got, model)
+	}
+	env = providerChainEnv("deepinfra,ollama")
+	translator, _, err = buildTranslatorChain(func(name string) string { return env[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := providerNames(translator); got != "deepinfra,ollama" {
+		t.Fatalf("chain=%s", got)
 	}
 }
 
 func TestProviderChainSummaryIsOrderedAndSecretFree(t *testing.T) {
-	env := map[string]string{
-		"GEMINI_API_KEY": "gem-secret", "GEMINI_MODEL": "gem-model",
-		"CEREBRAS_API_KEY": "cer-secret", "CEREBRAS_MODEL": "qwen-3-32b",
-		"OLLAMA_MODEL": "local-model",
-	}
+	env := providerChainEnv("deepinfra,together,ollama")
+	delete(env, "PROVIDER_TOGETHER_MODEL")
+	env["OLLAMA_MODEL"] = "local-model"
 	summary := providerChainSummary(func(name string) string { return env[name] })
 	want := []string{
-		"gemini: enabled model=gem-model",
-		"cerebras: enabled model=qwen-3-32b",
-		"groq: disabled (GROQ_API_KEY not set)",
-		"mistral: disabled (MISTRAL_API_KEY not set)",
-		"openrouter: disabled (OPENROUTER_API_KEY not set)",
+		"deepinfra: enabled model=deep-model mode=json_schema",
+		"together: disabled (PROVIDER_TOGETHER_MODEL not set)",
 		"ollama: enabled model=local-model (final fallback)",
 	}
 	position := -1
@@ -116,18 +155,41 @@ func TestProviderChainSummaryIsOrderedAndSecretFree(t *testing.T) {
 		}
 		position = next
 	}
-	for _, secret := range []string{"gem-secret", "cer-secret"} {
+	for _, secret := range []string{"deep-secret", "together-secret"} {
 		if strings.Contains(summary, secret) {
 			t.Fatalf("summary leaked secret: %q", summary)
 		}
 	}
 }
 
-func TestProviderChainSummaryAllCloudsAbsent(t *testing.T) {
-	summary := providerChainSummary(func(string) string { return "" })
-	if strings.Count(summary, "disabled") != len(cloudDefinitions) || !strings.Contains(summary, "ollama: enabled model="+defaultOllamaModel) {
-		t.Fatalf("summary=%q", summary)
+func providerChainEnv(chain string) map[string]string {
+	return map[string]string{
+		"PROVIDER_CHAIN":              chain,
+		"PROVIDER_DEEPINFRA_BASE_URL": "https://api.deepinfra.com/v1/openai",
+		"PROVIDER_DEEPINFRA_API_KEY":  "deep-secret",
+		"PROVIDER_DEEPINFRA_MODEL":    "deep-model",
+		"PROVIDER_DEEPINFRA_MODE":     "json_schema",
+		"PROVIDER_TOGETHER_BASE_URL":  "https://api.together.xyz/v1",
+		"PROVIDER_TOGETHER_API_KEY":   "together-secret",
+		"PROVIDER_TOGETHER_MODEL":     "together-model",
+		"PROVIDER_TOGETHER_MODE":      "json_object",
 	}
+}
+
+func providerNames(translator Translator) string {
+	chain := translator.(*chainTranslator)
+	var names []string
+	for _, provider := range chain.providers {
+		switch typed := provider.(type) {
+		case *openAITranslator:
+			names = append(names, typed.profile.Name)
+		case *ollamaTranslator:
+			names = append(names, "ollama")
+		default:
+			names = append(names, fmt.Sprintf("%T", provider))
+		}
+	}
+	return strings.Join(names, ",")
 }
 
 func TestCerebrasAdapterContractAndIdentity(t *testing.T) {

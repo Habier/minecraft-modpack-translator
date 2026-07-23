@@ -60,15 +60,18 @@ func providerProfilesFromEnv(getenv func(string) string) ([]providerProfile, err
 func providerProfileFromEnv(entry providerChainEntry, getenv func(string) string) (providerProfile, error) {
 	prefix := "PROVIDER_" + entry.envSuffix + "_"
 	baseEnv, keyEnv, modelEnv, modeEnv := providerEnvNames(prefix)
-	base := strings.TrimSpace(getenv(baseEnv))
+	rawBase := getenv(baseEnv)
+	base := strings.TrimSpace(rawBase)
 	if base == "" {
 		return providerProfile{}, fmt.Errorf("%s is required for provider %s", baseEnv, entry.name)
 	}
-	key := strings.TrimSpace(getenv(keyEnv))
+	rawKey := getenv(keyEnv)
+	key := strings.TrimSpace(rawKey)
 	if key == "" {
 		return providerProfile{}, fmt.Errorf("%s is required for provider %s", keyEnv, entry.name)
 	}
-	model := strings.TrimSpace(getenv(modelEnv))
+	rawModel := getenv(modelEnv)
+	model := strings.TrimSpace(rawModel)
 	if model == "" {
 		return providerProfile{}, fmt.Errorf("%s is required for provider %s", modelEnv, entry.name)
 	}
@@ -76,7 +79,7 @@ func providerProfileFromEnv(entry providerChainEntry, getenv func(string) string
 	if err != nil {
 		return providerProfile{}, err
 	}
-	if containsControlCharacter(entry.name) || containsControlCharacter(key) || containsControlCharacter(model) {
+	if containsControlCharacter(entry.name) || containsControlCharacter(rawBase) || containsControlCharacter(rawKey) || containsControlCharacter(rawModel) {
 		return providerProfile{}, fmt.Errorf("provider %s configuration contains invalid control characters", entry.name)
 	}
 	parsed, err := parseProviderURL(baseEnv, base)

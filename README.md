@@ -66,32 +66,31 @@ Use either:
 
 `workspace/` is internal working state. Do not distribute it.
 
-## Translation providers
+## Translation Providers
 
-Provider order:
+Configure provider order with `PROVIDER_CHAIN`. Each non-`ollama` entry is treated as an OpenAI-compatible API and must have its own explicit block.
 
 ```text
-Gemini -> Cerebras -> Groq -> Mistral -> OpenRouter -> Ollama (local fallback)
+PROVIDER_CHAIN=deepinfra,together,ollama
+
+PROVIDER_DEEPINFRA_BASE_URL=https://api.deepinfra.com/v1/openai
+PROVIDER_DEEPINFRA_API_KEY=<api-key>
+PROVIDER_DEEPINFRA_MODEL=<model>
+PROVIDER_DEEPINFRA_MODE=json_schema
+
+PROVIDER_TOGETHER_BASE_URL=https://api.together.xyz/v1
+PROVIDER_TOGETHER_API_KEY=<api-key>
+PROVIDER_TOGETHER_MODEL=<model>
+PROVIDER_TOGETHER_MODE=json_object
 ```
 
-Cloud providers are enabled only when their API key is configured. Each enabled cloud provider also needs an explicit model name.
+Names in `PROVIDER_CHAIN` may contain letters, numbers, underscores, and hyphens. For env lookup, names are uppercased and hyphens become underscores, so `together-ai` uses `PROVIDER_TOGETHER_AI_*`.
 
-If no cloud provider is configured, the tool uses local Ollama.
+Supported provider modes are `json_schema` and `json_object`. Cloud provider base URLs must be HTTPS URLs without credentials, query strings, or fragments.
 
-Common variables:
+Ollama is used only when `ollama` appears in `PROVIDER_CHAIN`. If `PROVIDER_CHAIN` is unset, the default chain is `ollama` only.
 
-| Variable | Purpose |
-|---|---|
-| `GEMINI_API_KEY`, `GEMINI_MODEL` | Gemini provider |
-| `CEREBRAS_API_KEY`, `CEREBRAS_MODEL` | Cerebras provider |
-| `GROQ_API_KEY`, `GROQ_MODEL` | Groq provider |
-| `MISTRAL_API_KEY`, `MISTRAL_MODEL` | Mistral provider |
-| `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | OpenRouter provider |
-| `OLLAMA_HOST` | Ollama endpoint, defaults to `http://localhost:11434` |
-| `OLLAMA_MODEL` | Ollama model, defaults to `qwen3:8b` |
-| `OLLAMA_TIMEOUT` | Ollama request timeout, defaults to `30m` |
-
-API keys can come from your environment or from a `.env` file beside the compiled executable.
+API keys can come from your environment or from a `.env` file beside the compiled executable. Keep `.env` private; it is plain text.
 
 ## Supported modpack discovery
 
