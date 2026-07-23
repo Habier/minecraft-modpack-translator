@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build release binaries
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache: true
+
+      - name: Verify formatting
+        shell: pwsh
+        run: |
+          $files = gofmt -l .
+          if ($files) {
+            $files
+            exit 1
+          }
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Build binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+
+          build() {
+            local goos="$1"
+            local goarch="$2"
+            local output="$3"
+
+            echo "Building ${output}"
+            CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
+              go build -trimpath -ldflags='-s -w' -o "dist/${output}" .
+          }
+
+          build windows amd64 modpack-translator-windows-amd64.exe
+          build linux amd64 modpack-translator-linux-amd64
+          build darwin amd64 modpack-translator-darwin-amd64
+          build darwin arm64 modpack-translator-darwin-arm64
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Create GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Release ${GITHUB_REF_NAME}. See SHA256SUMS.txt for artifact checksums." \
+              --verify-tag
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
