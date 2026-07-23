@@ -1025,7 +1025,7 @@ func TestCommonModpackSearchRootsStartsWithCurrentDirectory(t *testing.T) {
 	if len(roots) == 0 {
 		t.Fatal("commonModpackSearchRoots() returned no roots")
 	}
-	if roots[0] != root {
+	if !sameFilesystemPath(t, roots[0], root) {
 		t.Fatalf("first search root = %q, want current directory %q", roots[0], root)
 	}
 }
@@ -1053,7 +1053,7 @@ func TestModpackPathFromArgsUsesCurrentDirectoryWhenItIsAModpack(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if got != root {
+		if !sameFilesystemPath(t, got, root) {
 			t.Fatalf("modpackPathFromArgs(nil) = %q, want current directory %q", got, root)
 		}
 		return nil
@@ -1064,6 +1064,19 @@ func TestModpackPathFromArgsUsesCurrentDirectoryWhenItIsAModpack(t *testing.T) {
 	if !strings.Contains(output, "Modpack detectado:") {
 		t.Fatalf("output = %q, want detected modpack message", output)
 	}
+}
+
+func sameFilesystemPath(t *testing.T, got, want string) bool {
+	t.Helper()
+	gotResolved, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("resolve %q: %v", got, err)
+	}
+	wantResolved, err := filepath.EvalSymlinks(want)
+	if err != nil {
+		t.Fatalf("resolve %q: %v", want, err)
+	}
+	return filepath.Clean(gotResolved) == filepath.Clean(wantResolved)
 }
 
 func TestSelectModpack(t *testing.T) {
