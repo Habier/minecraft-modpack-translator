@@ -3,6 +3,8 @@ package writeback
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -121,6 +124,8 @@ func Workspace(modpackPath string) (string, error) {
 				translation: translation,
 				valueType:   entry.Writeback.ValueType,
 				container:   entry.Writeback.Container,
+				arrayIndex:  entry.Writeback.ArrayIndex,
+				sourceHash:  entry.Writeback.SourceSHA256,
 			}
 			ftbQuestSNBT[sf] = fe
 		}
@@ -239,17 +244,15 @@ func Workspace(modpackPath string) (string, error) {
 				return "", fmt.Errorf("reading FTB Quests source %s: %w", srcPath, err)
 			}
 
-			content := string(data)
-			for _, info := range fe.fields {
-				old := `"` + info.source + `"`
-				new := `"` + info.translation + `"`
-				content = strings.ReplaceAll(content, old, new)
+			content, err := applyFTBWriteback(data, fe)
+			if err != nil {
+				return "", err
 			}
 
 			if err := os.MkdirAll(filepath.Dir(exportPath), 0755); err != nil {
 				return "", fmt.Errorf("creating FTB Quests directory for %s: %w", exportPath, err)
 			}
-			if err := os.WriteFile(exportPath, []byte(content), 0644); err != nil {
+			if err := os.WriteFile(exportPath, content, 0644); err != nil {
 				return "", fmt.Errorf("writing FTB Quests file %s: %w", exportPath, err)
 			}
 			fmt.Printf("  [FTB] %s -> %s\n", filepath.Base(sf), exportPath)
@@ -425,6 +428,8 @@ type fieldInfo struct {
 	translation string
 	valueType   string
 	container   string
+	arrayIndex  *int
+	sourceHash  string
 }
 
 func writePatchouli(workspace, exportPack string, entries []patchouliWriteback, translated map[string]string) error {
@@ -593,6 +598,396 @@ func setNested(root map[string]any, parts []string, value string) error {
 	}
 
 	return nil
+}
+
+type ftbReplacement struct {
+	start int
+	end   int
+	value string
+}
+
+func applyFTBWriteback(data []byte, entry ftbEntry) ([]byte, error) {
+	digest := sha256.Sum256(data)
+	actualHash := hex.EncodeToString(digest[:])
+	locators := make([]string, 0, len(entry.fields))
+	for locator := range entry.fields {
+		locators = append(locators, locator)
+	}
+	sort.Strings(locators)
+
+	replacements := make([]ftbReplacement, 0, len(locators))
+	seenSpans := map[[2]int]string{}
+	for _, locator := range locators {
+		info := entry.fields[locator]
+		if info.sourceHash == "" || info.sourceHash != actualHash {
+			return nil, fmt.Errorf("FTB Quests source hash mismatch for %s%s", entry.sourceFile, locator)
+		}
+		if info.valueType != "string" {
+			return nil, fmt.Errorf("FTB Quests %s%s has unsupported value type %q", entry.sourceFile, locator, info.valueType)
+		}
+		parts := ftbLocatorParts(locator)
+		if len(parts) == 0 {
+			return nil, fmt.Errorf("FTB Quests %s has empty locator", entry.sourceFile)
+		}
+		if info.container == "array" {
+			if info.arrayIndex == nil || parts[len(parts)-1] != fmt.Sprint(*info.arrayIndex) {
+				return nil, fmt.Errorf("FTB Quests %s%s array index metadata mismatch", entry.sourceFile, locator)
+			}
+		} else if info.container == "object" {
+			if info.arrayIndex != nil {
+				return nil, fmt.Errorf("FTB Quests %s%s object metadata cannot include array index", entry.sourceFile, locator)
+			}
+		} else {
+			return nil, fmt.Errorf("FTB Quests %s%s has unsupported container %q", entry.sourceFile, locator, info.container)
+		}
+		start, end, source, err := findFTBString(data, parts, entry.format == "json5")
+		if err != nil {
+			return nil, fmt.Errorf("locate FTB Quests %s%s: %w", entry.sourceFile, locator, err)
+		}
+		if source != info.source {
+			return nil, fmt.Errorf("FTB Quests source mismatch for %s%s", entry.sourceFile, locator)
+		}
+		span := [2]int{start, end}
+		if previous, exists := seenSpans[span]; exists {
+			return nil, fmt.Errorf("FTB Quests locators %s and %s target the same source span", previous, locator)
+		}
+		seenSpans[span] = locator
+		replacements = append(replacements, ftbReplacement{start: start, end: end, value: info.translation})
+	}
+
+	sort.Slice(replacements, func(i, j int) bool { return replacements[i].start > replacements[j].start })
+	out := append([]byte(nil), data...)
+	for _, replacement := range replacements {
+		encoded, err := json.Marshal(replacement.value)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out[:replacement.start], append(encoded, out[replacement.end:]...)...)
+	}
+	return out, nil
+}
+
+func ftbLocatorParts(locator string) []string {
+	trimmed := strings.TrimPrefix(locator, "/")
+	if trimmed == "" {
+		return nil
+	}
+	raw := strings.Split(trimmed, "/")
+	parts := make([]string, len(raw))
+	for i, part := range raw {
+		part = strings.ReplaceAll(part, "~1", "/")
+		part = strings.ReplaceAll(part, "~0", "~")
+		parts[i] = part
+	}
+	return parts
+}
+
+func findFTBString(data []byte, parts []string, allowComments bool) (int, int, string, error) {
+	pos, err := skipFTBSpace(data, 0, allowComments)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	start, end, value, err := findFTBStringInValue(data, pos, parts, allowComments)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	return start, end, value, nil
+}
+
+func findFTBStringInValue(data []byte, pos int, parts []string, allowComments bool) (int, int, string, error) {
+	var err error
+	pos, err = skipFTBSpace(data, pos, allowComments)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	if pos >= len(data) {
+		return 0, 0, "", fmt.Errorf("unexpected end of file")
+	}
+	if data[pos] == '{' {
+		return findFTBStringInObject(data, pos, parts, allowComments)
+	}
+	if data[pos] == '[' {
+		return findFTBStringInArray(data, pos, parts, allowComments)
+	}
+	return 0, 0, "", fmt.Errorf("cannot descend into %q", data[pos])
+}
+
+func findFTBStringInObject(data []byte, pos int, parts []string, allowComments bool) (int, int, string, error) {
+	pos++
+	for {
+		var err error
+		pos, err = skipFTBSpaceAndComma(data, pos, allowComments)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		if pos >= len(data) {
+			return 0, 0, "", fmt.Errorf("unterminated object")
+		}
+		if data[pos] == '}' {
+			return 0, 0, "", fmt.Errorf("key %q not found", parts[0])
+		}
+		key, next, err := parseFTBKey(data, pos, allowComments)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		pos, err = skipFTBSpace(data, next, allowComments)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		if pos >= len(data) || data[pos] != ':' {
+			return 0, 0, "", fmt.Errorf("missing colon after key %q", key)
+		}
+		valuePos, err := skipFTBSpace(data, pos+1, allowComments)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		if key == parts[0] {
+			if len(parts) == 1 {
+				return parseFTBStringAt(data, valuePos)
+			}
+			return findFTBStringInValue(data, valuePos, parts[1:], allowComments)
+		}
+		pos, err = skipFTBValue(data, valuePos, allowComments)
+		if err != nil {
+			return 0, 0, "", err
+		}
+	}
+}
+
+func findFTBStringInArray(data []byte, pos int, parts []string, allowComments bool) (int, int, string, error) {
+	target, err := parseInt(parts[0])
+	if err != nil {
+		return 0, 0, "", fmt.Errorf("array locator %q is not numeric", parts[0])
+	}
+	pos++
+	index := 0
+	for {
+		var err error
+		pos, err = skipFTBSpaceAndComma(data, pos, allowComments)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		if pos >= len(data) {
+			return 0, 0, "", fmt.Errorf("unterminated array")
+		}
+		if data[pos] == ']' {
+			return 0, 0, "", fmt.Errorf("array index %d out of range", target)
+		}
+		if index == target {
+			if len(parts) == 1 {
+				return parseFTBStringAt(data, pos)
+			}
+			return findFTBStringInValue(data, pos, parts[1:], allowComments)
+		}
+		pos, err = skipFTBValue(data, pos, allowComments)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		index++
+	}
+}
+
+func parseFTBKey(data []byte, pos int, allowComments bool) (string, int, error) {
+	if pos < len(data) && (data[pos] == '"' || data[pos] == '\'') {
+		_, end, value, err := parseFTBStringAt(data, pos)
+		return value, end, err
+	}
+	start := pos
+	for pos < len(data) && data[pos] != ':' && !isFTBSpace(data[pos]) {
+		if allowComments {
+			next, err := skipFTBComment(data, pos)
+			if err != nil {
+				return "", 0, err
+			}
+			if next != pos {
+				break
+			}
+		}
+		pos++
+	}
+	if start == pos {
+		return "", 0, fmt.Errorf("missing object key")
+	}
+	return string(data[start:pos]), pos, nil
+}
+
+func parseFTBStringAt(data []byte, pos int) (int, int, string, error) {
+	if pos >= len(data) || (data[pos] != '"' && data[pos] != '\'') {
+		return 0, 0, "", fmt.Errorf("value is not a quoted string")
+	}
+	quote := data[pos]
+	var builder strings.Builder
+	for i := pos + 1; i < len(data); i++ {
+		c := data[i]
+		if c == quote {
+			return pos, i + 1, builder.String(), nil
+		}
+		if c == '\\' {
+			if i+1 >= len(data) {
+				return 0, 0, "", fmt.Errorf("unterminated escape")
+			}
+			i++
+			switch escaped := data[i]; escaped {
+			case '"', '\'', '\\', '/':
+				builder.WriteByte(escaped)
+			case 'b':
+				builder.WriteByte('\b')
+			case 'f':
+				builder.WriteByte('\f')
+			case 'n':
+				builder.WriteByte('\n')
+			case 'r':
+				builder.WriteByte('\r')
+			case 't':
+				builder.WriteByte('\t')
+			case 'u':
+				if i+4 >= len(data) {
+					return 0, 0, "", fmt.Errorf("unterminated unicode escape")
+				}
+				value, err := strconv.ParseInt(string(data[i+1:i+5]), 16, 32)
+				if err != nil {
+					return 0, 0, "", fmt.Errorf("invalid unicode escape")
+				}
+				builder.WriteRune(rune(value))
+				i += 4
+			default:
+				builder.WriteByte(escaped)
+			}
+			continue
+		}
+		builder.WriteByte(c)
+	}
+	return 0, 0, "", fmt.Errorf("unterminated string")
+}
+
+func skipFTBValue(data []byte, pos int, allowComments bool) (int, error) {
+	pos, err := skipFTBSpace(data, pos, allowComments)
+	if err != nil {
+		return 0, err
+	}
+	if pos >= len(data) {
+		return 0, fmt.Errorf("unexpected end of file")
+	}
+	switch data[pos] {
+	case '"', '\'':
+		_, end, _, err := parseFTBStringAt(data, pos)
+		return end, err
+	case '{':
+		return skipFTBDelimited(data, pos, '{', '}', allowComments)
+	case '[':
+		return skipFTBDelimited(data, pos, '[', ']', allowComments)
+	default:
+		for pos < len(data) && data[pos] != ',' && data[pos] != ']' && data[pos] != '}' && !isFTBSpace(data[pos]) {
+			if next, err := skipFTBComment(data, pos); err != nil {
+				return 0, err
+			} else if next != pos {
+				if !allowComments {
+					return 0, fmt.Errorf("comments are not supported in FTB quest SNBT")
+				}
+				break
+			}
+			pos++
+		}
+		return pos, nil
+	}
+}
+
+func skipFTBDelimited(data []byte, pos int, open, close byte, allowComments bool) (int, error) {
+	depth := 0
+	for pos < len(data) {
+		switch data[pos] {
+		case '"', '\'':
+			_, end, _, err := parseFTBStringAt(data, pos)
+			if err != nil {
+				return 0, err
+			}
+			pos = end
+			continue
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return pos + 1, nil
+			}
+		case '/':
+			next, err := skipFTBComment(data, pos)
+			if err != nil {
+				return 0, err
+			}
+			if next != pos {
+				if !allowComments {
+					return 0, fmt.Errorf("comments are not supported in FTB quest SNBT")
+				}
+				pos = next
+				continue
+			}
+		}
+		pos++
+	}
+	return 0, fmt.Errorf("unterminated %c", open)
+}
+
+func skipFTBSpaceAndComma(data []byte, pos int, allowComments bool) (int, error) {
+	pos, err := skipFTBSpace(data, pos, allowComments)
+	if err != nil {
+		return 0, err
+	}
+	if pos < len(data) && data[pos] == ',' {
+		pos, err = skipFTBSpace(data, pos+1, allowComments)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return pos, nil
+}
+
+func skipFTBSpace(data []byte, pos int, allowComments bool) (int, error) {
+	for pos < len(data) {
+		if isFTBSpace(data[pos]) {
+			pos++
+			continue
+		}
+		if !allowComments {
+			break
+		}
+		next, err := skipFTBComment(data, pos)
+		if err != nil {
+			return 0, err
+		}
+		if next == pos {
+			break
+		}
+		pos = next
+	}
+	return pos, nil
+}
+
+func skipFTBComment(data []byte, pos int) (int, error) {
+	if pos+1 >= len(data) || data[pos] != '/' {
+		return pos, nil
+	}
+	switch data[pos+1] {
+	case '/':
+		pos += 2
+		for pos < len(data) && data[pos] != '\n' && data[pos] != '\r' {
+			pos++
+		}
+		return pos, nil
+	case '*':
+		for i := pos + 2; i+1 < len(data); i++ {
+			if data[i] == '*' && data[i+1] == '/' {
+				return i + 2, nil
+			}
+		}
+		return 0, fmt.Errorf("unterminated block comment")
+	default:
+		return pos, nil
+	}
+}
+
+func isFTBSpace(c byte) bool {
+	return c == ' ' || c == '\n' || c == '\r' || c == '\t'
 }
 
 func parseInt(s string) (int, error) {
