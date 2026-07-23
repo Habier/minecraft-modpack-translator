@@ -58,7 +58,7 @@ func Workspace(modpackPath string) (string, error) {
 	}
 
 	PrintSharingInstructions(paths.zipPath)
-	
+
 	return paths.zipPath, nil
 }
 
