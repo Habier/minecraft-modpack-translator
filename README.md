@@ -26,6 +26,14 @@ Extract and translate:
 modpack-translator --translate "C:\path\to\your\modpack"
 ```
 
+Continue past malformed target language JSON when extracting:
+
+```powershell
+modpack-translator --force "C:\path\to\your\modpack"
+```
+
+`--force` only ignores malformed existing target language files such as `es_es.json`. Source language files such as `en_us.json` still fail because they are the extraction source of truth.
+
 When no path is provided, the tool searches common Minecraft launcher locations. If it finds one modpack, it uses it. If it finds several, it asks you to choose one by number.
 
 ## Requirements

@@ -12,6 +12,7 @@ type cliOptions struct {
 	modpackPath string
 	translate   bool
 	refresh     bool
+	force       bool
 }
 
 func parseCLI(args []string) (cliOptions, error) {
@@ -22,12 +23,16 @@ func parseCLI(args []string) (cliOptions, error) {
 	if err := rejectDuplicateFlag(args, "refresh"); err != nil {
 		return cliOptions{}, err
 	}
+	if err := rejectDuplicateFlag(args, "force"); err != nil {
+		return cliOptions{}, err
+	}
 
 	flags := pflag.NewFlagSet("modpack-translator", pflag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.SetInterspersed(true)
 	flags.BoolVar(&options.translate, "translate", false, "translate catalog and write completed translations back")
 	flags.BoolVar(&options.refresh, "refresh", false, "refresh extracted language sources")
+	flags.BoolVar(&options.force, "force", false, "continue past safe malformed target language files")
 
 	if err := flags.Parse(args); err != nil {
 		return cliOptions{}, err
@@ -35,7 +40,7 @@ func parseCLI(args []string) (cliOptions, error) {
 
 	paths := flags.Args()
 	if len(paths) > 1 {
-		return cliOptions{}, fmt.Errorf("usage: modpack-translator [--translate] [--refresh] [modpack-path]")
+		return cliOptions{}, fmt.Errorf("usage: modpack-translator [--translate] [--refresh] [--force] [modpack-path]")
 	}
 	if len(paths) == 1 {
 		options.modpackPath = paths[0]

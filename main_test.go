@@ -127,6 +127,7 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 		absent    []string
 		noPending []string
 		output    string
+		force     bool
 	}{
 		{
 			name: "preserves Spanish byte for byte",
@@ -214,13 +215,14 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 			output:  "[OK] mod.jar/example: es_es.json existente",
 		},
 		{
-			name: "malformed Spanish target is ignored before pending English keys",
+			name: "force ignores malformed Spanish target before pending English keys",
 			entries: []zipEntry{
 				{"assets/farmersdelight/lang/es_es.json", []byte(`{"tag.item.farmersdelight.wolf_prey":"Presa" "item.farmersdelight.tomato":"Tomate"}`)},
 				{"assets/farmersdelight/lang/en_us.json", []byte(`{"item.farmersdelight.tomato":"Tomato"}`)},
 			},
 			pending: map[string][]byte{"farmersdelight": []byte("{\n  \"item.farmersdelight.tomato\": \"Tomato\"\n}\n")},
 			output:  `[WARN] mod.jar/farmersdelight: ignoring malformed target assets/farmersdelight/lang/es_es.json: invalid character '"' after object key:value pair`,
+			force:   true,
 		},
 		{
 			name: "skips namespace without English or Spanish",
@@ -259,7 +261,12 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 			}
 
 			output, err := captureStdout(t, func() error {
-				return processMod(jarPath, outputPath)
+				aggregator := newLanguageAggregator(outputPath)
+				aggregator.force = tt.force
+				if err := aggregator.addJar(jarPath); err != nil {
+					return err
+				}
+				return aggregator.publish()
 			})
 			if err != nil {
 				t.Fatalf("processMod() error = %v", err)
@@ -508,6 +515,55 @@ func TestRunStandardLanguageFailuresPreserveWorkspace(t *testing.T) {
 				t.Fatal("failed extraction changed live workspace")
 			}
 		})
+	}
+}
+
+func TestRunForceControlsMalformedTargetLanguage(t *testing.T) {
+	malformedTarget := []byte(`{"tag.item.farmersdelight.wolf_prey":"Presa" "item.farmersdelight.tomato":"Tomate"}`)
+
+	t.Run("strict default rejects malformed target", func(t *testing.T) {
+		modpack, jar := testModpack(t)
+		writeTestJar(t, jar, []zipEntry{
+			{"assets/farmersdelight/lang/es_es.json", malformedTarget},
+			{"assets/farmersdelight/lang/en_us.json", []byte(`{"item.farmersdelight.tomato":"Tomato"}`)},
+		})
+
+		err := run([]string{modpack})
+		if err == nil || !strings.Contains(err.Error(), `parse assets/farmersdelight/lang/es_es.json in mod.jar`) || !strings.Contains(err.Error(), `invalid character '"' after object key:value pair`) {
+			t.Fatalf("run() error = %v, want malformed target parse failure", err)
+		}
+	})
+
+	t.Run("force warns and continues past malformed target", func(t *testing.T) {
+		modpack, jar := testModpack(t)
+		writeTestJar(t, jar, []zipEntry{
+			{"assets/farmersdelight/lang/es_es.json", malformedTarget},
+			{"assets/farmersdelight/lang/en_us.json", []byte(`{"item.farmersdelight.tomato":"Tomato"}`)},
+		})
+
+		output, err := captureStdout(t, func() error { return run([]string{"--force", modpack}) })
+		if err != nil {
+			t.Fatalf("run() error = %v", err)
+		}
+		wantWarning := `[WARN] mod.jar/farmersdelight: ignoring malformed target assets/farmersdelight/lang/es_es.json: invalid character '"' after object key:value pair`
+		if !strings.Contains(output, wantWarning) {
+			t.Fatalf("output = %q, want warning %q", output, wantWarning)
+		}
+		workspace, _ := outputPaths(modpack)
+		pending := mustRead(t, filepath.Join(workspace, "assets", "farmersdelight", "lang", pendingTranslationFileName()))
+		if string(pending) != "{\n  \"item.farmersdelight.tomato\": \"Tomato\"\n}\n" {
+			t.Fatalf("pending = %q", pending)
+		}
+	})
+}
+
+func TestRunForceDoesNotIgnoreMalformedSourceLanguage(t *testing.T) {
+	modpack, jar := testModpack(t)
+	writeTestJar(t, jar, []zipEntry{{"assets/example/lang/en_us.json", []byte(`{"broken":`)}})
+
+	err := run([]string{"--force", modpack})
+	if err == nil || !strings.Contains(err.Error(), "parse assets/example/lang/en_us.json in mod.jar") || !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("run() error = %v, want malformed source parse failure", err)
 	}
 }
 

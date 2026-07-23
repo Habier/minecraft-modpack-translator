@@ -113,6 +113,7 @@ func runWithLanguageLimits(args []string, limits languageLimits) (err error) {
 
 	languages := newLanguageAggregatorWithLimits(extractor.stageWorkspace, limits)
 	languages.refresh = options.refresh
+	languages.force = options.force
 	for _, jarPath := range jarFiles {
 		if err := languages.addJar(jarPath); err != nil {
 			return fmt.Errorf("extract standard language from %s: %w", filepath.Base(jarPath), err)
@@ -444,6 +445,7 @@ type languageAggregator struct {
 	byNamespace map[string]*namespaceLanguages
 	budget      languageBudget
 	refresh     bool
+	force       bool
 }
 
 func newLanguageAggregator(outputPath string) *languageAggregator {
@@ -546,6 +548,9 @@ func (a *languageAggregator) addJar(jarPath string) error {
 		if language == targetLanguageFileName() {
 			keys, members, err := collectTargetLanguageKeys(data)
 			if err != nil {
+				if !a.force {
+					return fmt.Errorf("parse %s in %s: %w", file.Name, filepath.Base(jarPath), err)
+				}
 				fmt.Printf("[WARN] %s/%s: ignoring malformed target %s: %v\n", filepath.Base(jarPath), namespace, file.Name, err)
 				continue
 			}
