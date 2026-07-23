@@ -56,12 +56,18 @@ func Workspace(modpackPath string) (string, error) {
 	if err := createOverridesZip(paths.exportOverrides, paths.zipPath); err != nil {
 		return "", fmt.Errorf("creating ZIP: %w", err)
 	}
-	fmt.Printf("\nShareable ZIP: %s\n", paths.zipPath)
+
+	PrintSharingInstructions(paths.zipPath)
+	
+	return paths.zipPath, nil
+}
+
+func PrintSharingInstructions(zipPath string) {
+	fmt.Printf("\nShareable ZIP: %s\n", zipPath)
 	fmt.Println("\nDone. To use in Minecraft:")
 	fmt.Println("  1. Share or extract the ZIP into the Minecraft instance root:")
-	fmt.Println("     " + paths.zipPath)
+	fmt.Println("     " + zipPath)
 	fmt.Println("  2. Enable 'ModpackTranslations' in-game (Options > Resource Packs)")
-	return paths.zipPath, nil
 }
 
 func ZipPath(modpackPath string) string {
