@@ -50,7 +50,7 @@ func run(args []string) error {
 	return runWithLanguageLimits(args, defaultLanguageLimits())
 }
 
-func runWithLanguageLimits(args []string, limits languageLimits) error {
+func runWithLanguageLimits(args []string, limits languageLimits) (err error) {
 	options, err := parseCLI(args)
 	if err != nil {
 		return err
@@ -63,6 +63,17 @@ func runWithLanguageLimits(args []string, limits languageLimits) error {
 	if err != nil {
 		return err
 	}
+	logSession, err := startSessionLog(modpackPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			logSession.writeError(err)
+		}
+		_ = logSession.close()
+	}()
+	fmt.Printf("Session log: %s\n", logSession.path)
 	if options.translate {
 		if err := writeback.RemoveStaleZip(modpackPath); err != nil {
 			return err
