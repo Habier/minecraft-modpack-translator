@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -37,52 +38,129 @@ type providerProfile struct {
 	RequireParams    bool
 }
 
-var cloudDefinitions = []struct {
-	name, keyEnv, modelEnv, urlEnv, base, officialHost string
-	mode                                               capabilityMode
-	arrayLength                                        bool
-	requireParams                                      bool
-}{
-	{"gemini", "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai", "generativelanguage.googleapis.com", modeJSONSchema, true, false},
-	{"cerebras", "CEREBRAS_API_KEY", "CEREBRAS_MODEL", "CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1", "api.cerebras.ai", modeJSONSchema, false, false},
-	{"groq", "GROQ_API_KEY", "GROQ_MODEL", "GROQ_BASE_URL", "https://api.groq.com/openai/v1", "api.groq.com", modeJSONObject, false, false},
-	{"mistral", "MISTRAL_API_KEY", "MISTRAL_MODEL", "MISTRAL_BASE_URL", "https://api.mistral.ai/v1", "api.mistral.ai", modeJSONSchema, true, false},
-	{"openrouter", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1", "openrouter.ai", modeJSONSchema, true, true},
-}
-
 func providerProfilesFromEnv(getenv func(string) string) ([]providerProfile, error) {
+	entries, err := providerChainFromEnv(getenv)
+	if err != nil {
+		return nil, err
+	}
 	var profiles []providerProfile
-	for _, definition := range cloudDefinitions {
-		key := strings.TrimSpace(getenv(definition.keyEnv))
-		if key == "" {
+	for _, entry := range entries {
+		if entry.name == "ollama" {
 			continue
 		}
-		model := strings.TrimSpace(getenv(definition.modelEnv))
-		if model == "" {
-			return nil, fmt.Errorf("%s is required when %s is configured", definition.modelEnv, definition.keyEnv)
-		}
-		if strings.ContainsAny(key+model, "\r\n\x00") {
-			return nil, fmt.Errorf("%s provider configuration contains invalid control characters", definition.name)
-		}
-		base := strings.TrimSpace(getenv(definition.urlEnv))
-		if base == "" {
-			base = definition.base
-		}
-		parsed, err := parseProviderURL(definition.urlEnv, base)
+		profile, err := providerProfileFromEnv(entry, getenv)
 		if err != nil {
 			return nil, err
 		}
-		if parsed.Host != definition.officialHost {
-			return nil, fmt.Errorf("%s must use the official HTTPS host %s", definition.urlEnv, definition.officialHost)
-		}
-		profiles = append(profiles, providerProfile{Name: definition.name, Key: key, Model: model, BaseURL: parsed, Mode: definition.mode, ArrayLength: definition.arrayLength, RequireParams: definition.requireParams})
+		profiles = append(profiles, profile)
 	}
 	return profiles, nil
 }
 
+func providerProfileFromEnv(entry providerChainEntry, getenv func(string) string) (providerProfile, error) {
+	prefix := "PROVIDER_" + entry.envSuffix + "_"
+	baseEnv, keyEnv, modelEnv, modeEnv := providerEnvNames(prefix)
+	base := strings.TrimSpace(getenv(baseEnv))
+	if base == "" {
+		return providerProfile{}, fmt.Errorf("%s is required for provider %s", baseEnv, entry.name)
+	}
+	key := strings.TrimSpace(getenv(keyEnv))
+	if key == "" {
+		return providerProfile{}, fmt.Errorf("%s is required for provider %s", keyEnv, entry.name)
+	}
+	model := strings.TrimSpace(getenv(modelEnv))
+	if model == "" {
+		return providerProfile{}, fmt.Errorf("%s is required for provider %s", modelEnv, entry.name)
+	}
+	mode, err := parseProviderMode(strings.TrimSpace(getenv(modeEnv)), modeEnv, entry.name)
+	if err != nil {
+		return providerProfile{}, err
+	}
+	if containsControlCharacter(entry.name) || containsControlCharacter(key) || containsControlCharacter(model) {
+		return providerProfile{}, fmt.Errorf("provider %s configuration contains invalid control characters", entry.name)
+	}
+	parsed, err := parseProviderURL(baseEnv, base)
+	if err != nil {
+		return providerProfile{}, err
+	}
+	return providerProfile{Name: entry.name, Key: key, Model: model, BaseURL: parsed, Mode: mode}, nil
+}
+
+func providerEnvNames(prefix string) (baseEnv, keyEnv, modelEnv, modeEnv string) {
+	return prefix + "BASE_URL", prefix + "API_KEY", prefix + "MODEL", prefix + "MODE"
+}
+
+type providerChainEntry struct {
+	name      string
+	envSuffix string
+}
+
+func providerChainFromEnv(getenv func(string) string) ([]providerChainEntry, error) {
+	chain := strings.TrimSpace(getenv("PROVIDER_CHAIN"))
+	if chain == "" {
+		return []providerChainEntry{{name: "ollama", envSuffix: "OLLAMA"}}, nil
+	}
+	parts := strings.Split(chain, ",")
+	entries := make([]providerChainEntry, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			return nil, fmt.Errorf("PROVIDER_CHAIN contains an empty provider name")
+		}
+		entry, err := normalizeProviderName(name)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[entry.envSuffix]; ok {
+			return nil, fmt.Errorf("PROVIDER_CHAIN contains duplicate provider %s", entry.name)
+		}
+		seen[entry.envSuffix] = struct{}{}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+func normalizeProviderName(name string) (providerChainEntry, error) {
+	if containsControlCharacter(name) {
+		return providerChainEntry{}, fmt.Errorf("PROVIDER_CHAIN provider names must not contain control characters")
+	}
+	var suffix strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			suffix.WriteRune(unicode.ToUpper(r))
+		case r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			suffix.WriteRune(r)
+		case r == '-':
+			suffix.WriteRune('_')
+		default:
+			return providerChainEntry{}, fmt.Errorf("PROVIDER_CHAIN provider %q is invalid; use only letters, numbers, underscores, and hyphens", name)
+		}
+	}
+	return providerChainEntry{name: strings.ToLower(name), envSuffix: suffix.String()}, nil
+}
+
+func parseProviderMode(value, envName, providerName string) (capabilityMode, error) {
+	switch capabilityMode(value) {
+	case modeJSONSchema:
+		return modeJSONSchema, nil
+	case modeJSONObject:
+		return modeJSONObject, nil
+	case "":
+		return "", fmt.Errorf("%s is required for provider %s", envName, providerName)
+	default:
+		return "", fmt.Errorf("%s must be one of: %s, %s", envName, modeJSONSchema, modeJSONObject)
+	}
+}
+
+func containsControlCharacter(value string) bool {
+	return strings.ContainsFunc(value, unicode.IsControl)
+}
+
 func parseProviderURL(envName, value string) (*url.URL, error) {
 	parsed, err := url.Parse(value)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || containsControlCharacter(value) || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, fmt.Errorf("%s must be an HTTPS URL without credentials, query, or fragment", envName)
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
@@ -432,38 +510,70 @@ func safeTransitionReason(err *ProviderError) string {
 
 func providerChainSummary(getenv func(string) string) string {
 	lines := []string{"Provider chain:"}
-	for _, definition := range cloudDefinitions {
-		key, model := strings.TrimSpace(getenv(definition.keyEnv)), strings.TrimSpace(getenv(definition.modelEnv))
+	entries, err := providerChainFromEnv(getenv)
+	if err != nil {
+		return strings.Join(append(lines, "  invalid: "+err.Error()), "\n")
+	}
+	for i, entry := range entries {
+		if entry.name == "ollama" {
+			model := strings.TrimSpace(getenv("OLLAMA_MODEL"))
+			if model == "" {
+				model = defaultOllamaModel
+			}
+			suffix := ""
+			if i == len(entries)-1 {
+				suffix = " (final fallback)"
+			}
+			lines = append(lines, fmt.Sprintf("  %s: enabled model=%s%s", entry.name, model, suffix))
+			continue
+		}
+		prefix := "PROVIDER_" + entry.envSuffix + "_"
+		baseEnv, keyEnv, modelEnv, modeEnv := providerEnvNames(prefix)
+		base, key, model, mode := strings.TrimSpace(getenv(baseEnv)), strings.TrimSpace(getenv(keyEnv)), strings.TrimSpace(getenv(modelEnv)), strings.TrimSpace(getenv(modeEnv))
 		switch {
+		case base == "":
+			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)", entry.name, baseEnv))
 		case key == "":
-			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)", definition.name, definition.keyEnv))
+			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)", entry.name, keyEnv))
 		case model == "":
-			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)", definition.name, definition.modelEnv))
+			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)", entry.name, modelEnv))
+		case mode == "":
+			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)", entry.name, modeEnv))
 		default:
-			lines = append(lines, fmt.Sprintf("  %s: enabled model=%s", definition.name, model))
+			lines = append(lines, fmt.Sprintf("  %s: enabled model=%s mode=%s", entry.name, model, mode))
 		}
 	}
-	model := strings.TrimSpace(getenv("OLLAMA_MODEL"))
-	if model == "" {
-		model = defaultOllamaModel
-	}
-	lines = append(lines, fmt.Sprintf("  ollama: enabled model=%s (final fallback)", model))
 	return strings.Join(lines, "\n")
 }
 
 func buildTranslatorChain(getenv func(string) string) (Translator, string, error) {
-	profiles, err := providerProfilesFromEnv(getenv)
+	entries, err := providerChainFromEnv(getenv)
 	if err != nil {
 		return nil, "", err
 	}
-	host, model, timeout, err := ollamaConfigFromEnv(getenv)
-	if err != nil {
-		return nil, "", err
-	}
-	providers := make([]Translator, 0, len(profiles)+1)
-	for _, profile := range profiles {
+	providers := make([]Translator, 0, len(entries))
+	cacheModel := ""
+	for _, entry := range entries {
+		if entry.name == "ollama" {
+			host, model, timeout, err := ollamaConfigFromEnv(getenv)
+			if err != nil {
+				return nil, "", err
+			}
+			providers = append(providers, newOllamaTranslator(host, model, timeout))
+			cacheModel = model
+			continue
+		}
+		profile, err := providerProfileFromEnv(entry, getenv)
+		if err != nil {
+			return nil, "", err
+		}
 		providers = append(providers, newOpenAITranslator(profile))
+		if cacheModel == "" {
+			cacheModel = profile.Model
+		}
 	}
-	providers = append(providers, newOllamaTranslator(host, model, timeout))
-	return &chainTranslator{providers: providers}, model, nil
+	if len(providers) == 0 {
+		return nil, "", fmt.Errorf("PROVIDER_CHAIN must include at least one provider")
+	}
+	return &chainTranslator{providers: providers}, cacheModel, nil
 }
