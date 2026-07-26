@@ -13,7 +13,7 @@ type localeEnv func(string) string
 
 func selectTargetLocale(input io.Reader, output io.Writer, getenv localeEnv) (string, error) {
 	defaultLocale := detectDefaultTargetLocale(getenv)
-	fmt.Fprintf(output, "Introduzca idioma al que traducir [%s]: ", defaultLocale)
+	fmt.Fprintf(output, "Enter target language [%s]: ", defaultLocale)
 
 	reader := bufio.NewReader(input)
 	line, err := reader.ReadString('\n')

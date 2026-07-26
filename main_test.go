@@ -136,7 +136,7 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 			},
 			ok:     []string{"example"},
 			absent: []string{"example"},
-			output: "[OK] mod.jar/example: es_es.json existente",
+			output: "[OK] mod.jar/example: es_es.json found",
 		},
 		{
 			name: "writes English to pending translation source",
@@ -182,7 +182,7 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 			},
 			ok:      []string{"refinedstorage"},
 			pending: map[string][]byte{"refinedstorage": []byte("{\n  \"missing\": \"Pending\"\n}\n")},
-			output:  "[OK] mod.jar/refinedstorage: es_es.json existente",
+			output:  "[OK] mod.jar/refinedstorage: es_es.json found",
 		},
 		{
 			name: "same JAR full Spanish target emits no pending when English appears last",
@@ -192,7 +192,7 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 			},
 			ok:     []string{"example"},
 			absent: []string{"example"},
-			output: "[OK] mod.jar/example: es_es.json existente",
+			output: "[OK] mod.jar/example: es_es.json found",
 		},
 		{
 			name: "same JAR full Spanish target emits no pending when English appears first",
@@ -202,7 +202,7 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 			},
 			ok:     []string{"example"},
 			absent: []string{"example"},
-			output: "[OK] mod.jar/example: es_es.json existente",
+			output: "[OK] mod.jar/example: es_es.json found",
 		},
 		{
 			name: "same JAR partial Spanish target emits missing English keys",
@@ -212,7 +212,7 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 			},
 			ok:      []string{"example"},
 			pending: map[string][]byte{"example": []byte("{\n  \"missing\": \"Pending\"\n}\n")},
-			output:  "[OK] mod.jar/example: es_es.json existente",
+			output:  "[OK] mod.jar/example: es_es.json found",
 		},
 		{
 			name: "force ignores malformed Spanish target before pending English keys",
@@ -230,7 +230,7 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 				{"assets/example/lang/fr_fr.json", []byte("french")},
 			},
 			absent: []string{"example"},
-			output: "[SKIP] mod.jar/example: sin es_es.json ni en_us.json",
+			output: "[SKIP] mod.jar/example: missing both es_es.json and en_us.json",
 		},
 		{
 			name: "handles multiple namespaces independently",
@@ -245,7 +245,7 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 				"alpha": []byte("{\n  \"key\": \"Alpha English\"\n}\n"),
 			},
 			absent: []string{"beta", "gamma"},
-			output: "[SKIP] mod.jar/gamma: sin es_es.json ni en_us.json",
+			output: "[SKIP] mod.jar/gamma: missing both es_es.json and en_us.json",
 		},
 	}
 
@@ -283,7 +283,7 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 			}
 
 			for _, namespace := range tt.ok {
-				wantOutput := "[OK] mod.jar/" + namespace + ": es_es.json existente"
+				wantOutput := "[OK] mod.jar/" + namespace + ": es_es.json found"
 				if !strings.Contains(output, wantOutput) {
 					t.Errorf("output = %q, want it to contain %q", output, wantOutput)
 				}
@@ -326,6 +326,7 @@ func TestProcessModSelectsLanguagePerNamespace(t *testing.T) {
 }
 
 func TestRunCreatesWorkspaceAndExportWithoutPendingExportFiles(t *testing.T) {
+	t.Setenv("LC_ALL", "es_ES.UTF-8")
 	modpackPath := t.TempDir()
 	if err := os.Mkdir(filepath.Join(modpackPath, "mods"), 0755); err != nil {
 		t.Fatalf("create mods directory: %v", err)
@@ -385,7 +386,7 @@ func TestRunCreatesWorkspaceAndExportWithoutPendingExportFiles(t *testing.T) {
 	if data, err := os.ReadFile(userFile); err != nil || string(data) != "keep" {
 		t.Errorf("unrelated export file = %q, %v; want preserved", data, err)
 	}
-	for _, want := range []string{workspacePath, exportPackPath, "archivos pendientes", "traducciones terminadas solamente", "Fuentes estándar:", "Fuentes Patchouli: 1 archivos", "Fuentes FTB Quests: 0 archivos", "Fuentes KubeJS: 1 archivos"} {
+	for _, want := range []string{workspacePath, exportPackPath, "pending files", "completed translations only", "Standard sources:", "Patchouli sources: 1 files", "FTB Quests sources: 0 files", "KubeJS sources: 1 files"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("output = %q, want it to contain %q", output, want)
 		}
@@ -649,13 +650,13 @@ func TestProcessModSkipsEmptyEnglishWithoutSkippingNamespaceTarget(t *testing.T)
 	}
 	for _, want := range []string{
 		"[SKIP] assets/example/lang/en_us.json: empty en_us.json",
-		"[OK] mod.jar/example: es_es.json existente",
+		"[OK] mod.jar/example: es_es.json found",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output = %q, want it to contain %q", output, want)
 		}
 	}
-	if strings.Contains(output, "mod.jar/example: sin es_es.json ni en_us.json") {
+	if strings.Contains(output, "mod.jar/example: missing both es_es.json and en_us.json") {
 		t.Fatalf("output = %q, empty source skipped the whole namespace", output)
 	}
 	assertAbsent(t, filepath.Join(outputPath, "assets", "example", "lang", pendingTranslationFileName()))
@@ -1162,6 +1163,7 @@ func TestRunCatalogFailureRollsBackAndSuccessPublishesMatchingHash(t *testing.T)
 
 func testModpack(t *testing.T) (string, string) {
 	t.Helper()
+	t.Setenv("LC_ALL", "es_ES.UTF-8")
 	root := t.TempDir()
 	os.Mkdir(filepath.Join(root, "mods"), 0755)
 	os.WriteFile(filepath.Join(root, "manifest.json"), []byte(`{"minecraft":{"version":"1.20.1"}}`), 0644)
@@ -1290,7 +1292,7 @@ func TestModpackPathFromArgsUsesCurrentDirectoryWhenItIsAModpack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("modpackPathFromArgs(nil) error = %v", err)
 	}
-	if !strings.Contains(output, "Modpack detectado:") {
+	if !strings.Contains(output, "Modpack detected:") {
 		t.Fatalf("output = %q, want detected modpack message", output)
 	}
 }
@@ -1323,11 +1325,11 @@ func TestSelectModpack(t *testing.T) {
 		t.Fatalf("selectModpack() = %q, want %q", got, candidates[1])
 	}
 	for _, want := range []string{
-		"Se encontraron varios modpacks:",
+		"Several modpacks were found:",
 		"1. " + candidates[0],
 		"2. " + candidates[1],
-		"Elige un modpack por número:",
-		"Modpack seleccionado: " + candidates[1],
+		"Choose a modpack by number:",
+		"Selected modpack: " + candidates[1],
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("output = %q, want it to contain %q", output.String(), want)

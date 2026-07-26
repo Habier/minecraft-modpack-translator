@@ -96,7 +96,7 @@ func runWithLanguageLimits(args []string, limits languageLimits) (err error) {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Minecraft detectado: %s (resource pack format %d)\n", minecraftVersion, packFormat)
+	fmt.Printf("Minecraft detected: %s (resource pack format %d)\n", minecraftVersion, packFormat)
 
 	if err := prepareOutputs(workspacePath, exportPackPath, minecraftVersion, packFormat, targetLocale); err != nil {
 		return err
@@ -107,7 +107,7 @@ func runWithLanguageLimits(args []string, limits languageLimits) (err error) {
 		return err
 	}
 
-	fmt.Printf("Encontrados %d mods\n", len(jarFiles))
+	fmt.Printf("Found %d mods\n", len(jarFiles))
 	fmt.Printf("Refresh mode: %s\n", enabledDisabled(options.refresh))
 	extractor, err := newSourceExtractor(workspacePath, targetLocale)
 	if err != nil {
@@ -148,14 +148,14 @@ func runWithLanguageLimits(args []string, limits languageLimits) (err error) {
 	}
 	catalogPath := filepath.Join(workspacePath, "catalog", "catalog.v1.json")
 
-	fmt.Printf("Fuentes estándar: procesados %d JARs\n", len(jarFiles))
-	fmt.Printf("Fuentes Patchouli: %d archivos\n", extractor.counts.patchouli)
-	fmt.Printf("Fuentes FTB Quests: %d archivos\n", extractor.counts.ftbquests)
-	fmt.Printf("Fuentes KubeJS: %d archivos\n", extractor.counts.kubejs)
-	fmt.Printf("Catálogo de traducción: %d entradas\n%s\n", entryCount, catalogPath)
+	fmt.Printf("Standard sources: processed %d JARs\n", len(jarFiles))
+	fmt.Printf("Patchouli sources: %d files\n", extractor.counts.patchouli)
+	fmt.Printf("FTB Quests sources: %d files\n", extractor.counts.ftbquests)
+	fmt.Printf("KubeJS sources: %d files\n", extractor.counts.kubejs)
+	fmt.Printf("Translation catalog: %d entries\n%s\n", entryCount, catalogPath)
 
-	fmt.Printf("\nWorkspace de traducción (archivos pendientes):\n%s\n", workspacePath)
-	fmt.Printf("\nResource pack de exportación (metadatos y traducciones terminadas solamente):\n%s\n", exportPackPath)
+	fmt.Printf("\nTranslation workspace (pending files):\n%s\n", workspacePath)
+	fmt.Printf("\nExport resource pack (metadata and completed translations only):\n%s\n", exportPackPath)
 	if options.translate {
 		translator, model, err := buildTranslatorChain(os.Getenv)
 		if err != nil {
@@ -184,7 +184,7 @@ func outputPaths(modpackPath string) (workspacePath, exportPackPath string) {
 
 func prepareOutputs(workspacePath, exportPackPath, minecraftVersion string, packFormat int, targetLocale ...string) error {
 	if err := os.MkdirAll(workspacePath, 0755); err != nil {
-		return fmt.Errorf("crear workspace de traducción: %w", err)
+		return fmt.Errorf("create translation workspace: %w", err)
 	}
 	if err := removePendingExportFiles(exportPackPath, targetLocale...); err != nil {
 		return err
@@ -211,13 +211,13 @@ func removePendingExportFiles(exportPackPath string, targetLocale ...string) err
 		_, language, isLanguageFile := languageFile(filepath.ToSlash(relativePath))
 		if isLanguageFile && language == pendingName {
 			if err := os.Remove(path); err != nil {
-				return fmt.Errorf("eliminar archivo pendiente obsoleto del export: %w", err)
+				return fmt.Errorf("remove stale pending export file: %w", err)
 			}
 		}
 		return nil
 	})
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("limpiar archivos pendientes del export: %w", err)
+		return fmt.Errorf("clean pending export files: %w", err)
 	}
 	return nil
 }
@@ -229,10 +229,10 @@ func modpackPathFromArgs(args []string) (string, error) {
 
 	currentDirectory, err := os.Getwd()
 	if err != nil {
-		return "", fmt.Errorf("leer ruta actual: %w", err)
+		return "", fmt.Errorf("read current path: %w", err)
 	}
 	if hasModsDirectory(currentDirectory) {
-		fmt.Printf("Modpack detectado: %s\n", currentDirectory)
+		fmt.Printf("Modpack detected: %s\n", currentDirectory)
 		return currentDirectory, nil
 	}
 
@@ -242,39 +242,39 @@ func modpackPathFromArgs(args []string) (string, error) {
 	}
 
 	if len(candidates) == 1 {
-		fmt.Printf("Modpack detectado: %s\n", candidates[0])
+		fmt.Printf("Modpack detected: %s\n", candidates[0])
 		return candidates[0], nil
 	}
 
 	if len(candidates) == 0 {
-		return "", errors.New("uso: minecraft-translator <ruta-del-modpack>\nNo se encontraron modpacks en la ruta actual ni en instalaciones comunes")
+		return "", errors.New("usage: minecraft-translator <modpack-path>\nNo modpacks found in the current path or common installation paths")
 	}
 
 	return selectModpack(candidates, os.Stdin, os.Stdout)
 }
 
 func selectModpack(candidates []string, input io.Reader, output io.Writer) (string, error) {
-	fmt.Fprintln(output, "Se encontraron varios modpacks:")
+	fmt.Fprintln(output, "Several modpacks were found:")
 	for i, candidate := range candidates {
 		fmt.Fprintf(output, "%d. %s\n", i+1, candidate)
 	}
-	fmt.Fprint(output, "Elige un modpack por número: ")
+	fmt.Fprint(output, "Choose a modpack by number: ")
 
 	scanner := bufio.NewScanner(input)
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {
-			return "", fmt.Errorf("leer selección: %w", err)
+			return "", fmt.Errorf("read selection: %w", err)
 		}
-		return "", errors.New("no se recibió ninguna selección")
+		return "", errors.New("no selection received")
 	}
 
 	choice, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
 	if err != nil || choice < 1 || choice > len(candidates) {
-		return "", fmt.Errorf("selección inválida: elige un número entre 1 y %d", len(candidates))
+		return "", fmt.Errorf("invalid selection: choose a number between 1 and %d", len(candidates))
 	}
 
 	selected := candidates[choice-1]
-	fmt.Fprintf(output, "Modpack seleccionado: %s\n", selected)
+	fmt.Fprintf(output, "Selected modpack: %s\n", selected)
 	return selected, nil
 }
 
@@ -361,7 +361,7 @@ func findModpacksInRoots(roots []string) ([]string, error) {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return nil, fmt.Errorf("leer instalación común %s: %w", root, err)
+			return nil, fmt.Errorf("read common installation %s: %w", root, err)
 		}
 
 		for _, entry := range entries {
@@ -594,18 +594,18 @@ func (a *languageAggregator) addJar(jarPath string) error {
 			}
 		}
 		if len(files.targets) > 0 {
-			fmt.Printf("[OK] %s/%s: %s existente\n", filepath.Base(jarPath), namespace, targetLanguageFileName(a.targetLocale))
+			fmt.Printf("[OK] %s/%s: %s found\n", filepath.Base(jarPath), namespace, targetLanguageFileName(a.targetLocale))
 		}
 		for _, source := range files.sources {
 			namespaceFiles.sources = append(namespaceFiles.sources, languageSource{jar: jarPath, values: source.values, duplicates: source.duplicates, nonStrings: source.nonStrings})
 		}
 		if len(files.targets) == 0 && len(files.sources) == 0 {
-			fmt.Printf("[SKIP] %s/%s: sin %s ni %s\n", filepath.Base(jarPath), namespace, targetLanguageFileName(a.targetLocale), sourceLanguageFileName())
+			fmt.Printf("[SKIP] %s/%s: missing both %s and %s\n", filepath.Base(jarPath), namespace, targetLanguageFileName(a.targetLocale), sourceLanguageFileName())
 		}
 	}
 
 	if len(byNamespace) == 0 {
-		fmt.Printf("[SKIP] %s: sin archivos de idioma\n", filepath.Base(jarPath))
+		fmt.Printf("[SKIP] %s: no language files\n", filepath.Base(jarPath))
 	}
 
 	return nil

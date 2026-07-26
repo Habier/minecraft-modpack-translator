@@ -42,12 +42,12 @@ func TestSelectTargetLocalePromptsWithDefault(t *testing.T) {
 		prompt  string
 		wantErr bool
 	}{
-		{name: "accepts detected default", env: map[string]string{"LANG": "fr_FR.UTF-8"}, input: "\n", want: "fr_fr", prompt: "Introduzca idioma al que traducir [fr_fr]: "},
-		{name: "ignores unsupported detected default", env: map[string]string{"LANG": "xx_YY.UTF-8"}, input: "\n", want: "es_es", prompt: "Introduzca idioma al que traducir [es_es]: "},
-		{name: "falls back to Spanish", env: map[string]string{}, input: "\n", want: "es_es", prompt: "Introduzca idioma al que traducir [es_es]: "},
-		{name: "normalizes typed locale", env: map[string]string{"LANG": "fr_FR.UTF-8"}, input: "pt-BR\n", want: "pt_br", prompt: "Introduzca idioma al que traducir [fr_fr]: "},
-		{name: "rejects valid shape unsupported by minecraft", env: map[string]string{}, input: "xx_yy\n", wantErr: true, prompt: "Introduzca idioma al que traducir [es_es]: "},
-		{name: "rejects invalid typed locale", env: map[string]string{}, input: "spanish\n", wantErr: true, prompt: "Introduzca idioma al que traducir [es_es]: "},
+		{name: "accepts detected default", env: map[string]string{"LANG": "fr_FR.UTF-8"}, input: "\n", want: "fr_fr", prompt: "Enter target language [fr_fr]: "},
+		{name: "ignores unsupported detected default", env: map[string]string{"LANG": "xx_YY.UTF-8"}, input: "\n", want: "es_es", prompt: "Enter target language [es_es]: "},
+		{name: "falls back to Spanish", env: map[string]string{}, input: "\n", want: "es_es", prompt: "Enter target language [es_es]: "},
+		{name: "normalizes typed locale", env: map[string]string{"LANG": "fr_FR.UTF-8"}, input: "pt-BR\n", want: "pt_br", prompt: "Enter target language [fr_fr]: "},
+		{name: "rejects valid shape unsupported by minecraft", env: map[string]string{}, input: "xx_yy\n", wantErr: true, prompt: "Enter target language [es_es]: "},
+		{name: "rejects invalid typed locale", env: map[string]string{}, input: "spanish\n", wantErr: true, prompt: "Enter target language [es_es]: "},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
