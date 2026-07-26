@@ -68,13 +68,14 @@ type CatalogWritebackV1 struct {
 }
 
 type catalogBuilder struct {
-	workspace string
-	entries   []CatalogEntryV1
-	aggregate int64
+	workspace    string
+	targetLocale string
+	entries      []CatalogEntryV1
+	aggregate    int64
 }
 
-func buildCatalog(workspace string) (int, string, error) {
-	b := &catalogBuilder{workspace: workspace}
+func buildCatalog(workspace string, targetLocale ...string) (int, string, error) {
+	b := &catalogBuilder{workspace: workspace, targetLocale: selectedTargetLocale(targetLocale...)}
 	if err := b.extractLang(); err != nil {
 		return 0, "", err
 	}
@@ -98,7 +99,7 @@ func buildCatalog(workspace string) (int, string, error) {
 		}
 		seen[entry.ID] = entry
 	}
-	catalog := CatalogV1{Schema: catalogSchema, SourceLocale: sourceLanguageCode, TargetLocale: targetLanguageCode, Entries: b.entries}
+	catalog := CatalogV1{Schema: catalogSchema, SourceLocale: sourceLanguageCode, TargetLocale: b.targetLocale, Entries: b.entries}
 	data, err := json.MarshalIndent(catalog, "", "  ")
 	if err != nil {
 		return 0, "", fmt.Errorf("marshal catalog: %w", err)
@@ -157,7 +158,7 @@ func (b *catalogBuilder) extractLang() error {
 	root := filepath.Join(b.workspace, "assets")
 	return walkSelected(root, func(relative string) bool {
 		parts := strings.Split(filepath.ToSlash(relative), "/")
-		return len(parts) == 3 && parts[1] == "lang" && parts[2] == pendingTranslationFileName()
+		return len(parts) == 3 && parts[1] == "lang" && parts[2] == pendingTranslationFileName(b.targetLocale)
 	}, func(filePath, relative string, data []byte) error {
 		var object map[string]json.RawMessage
 		if err := decodeJSONObjectUnique(data, &object); err != nil {
@@ -637,7 +638,7 @@ func (b *catalogBuilder) add(kind, sourceFile, locator, source, format, valueTyp
 		metadata[i] = CatalogTokenV1{Kind: string(token.Kind), Text: token.Text, Start: token.Start, End: token.End}
 	}
 	b.entries = append(b.entries, CatalogEntryV1{
-		ID: stableCatalogID(kind, clean, locator, targetLanguageCode), SourceKind: kind, SourceFile: clean, Locator: locator, Source: source, TargetLocale: targetLanguageCode, Tokens: metadata,
+		ID: stableCatalogID(kind, clean, locator, b.targetLocale), SourceKind: kind, SourceFile: clean, Locator: locator, Source: source, TargetLocale: b.targetLocale, Tokens: metadata,
 		Writeback: CatalogWritebackV1{Format: format, ValueType: valueType, Container: container, ArrayIndex: arrayIndex, SourceSHA256: hex.EncodeToString(digest[:]), Encoding: "UTF-8"},
 	})
 	return nil

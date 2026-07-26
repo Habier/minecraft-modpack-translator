@@ -355,6 +355,19 @@ func TestTranslationCacheV2ImportsOnlySelectedValidLegacyCache(t *testing.T) {
 	}
 }
 
+func TestTranslationCachePathUsesLocaleSpecificFilesForNonDefaultTargets(t *testing.T) {
+	workspace := t.TempDir()
+	if got := translationCachePath(workspace, "model", "es_es"); got != filepath.Join(workspace, "translations", "translations.v2.json") {
+		t.Fatalf("default cache path = %q", got)
+	}
+	if got := translationCachePath(workspace, "model", "fr_fr"); got != filepath.Join(workspace, "translations", "translations.fr_fr.v2.json") {
+		t.Fatalf("fr cache path = %q", got)
+	}
+	if got := translationFailureReportPath(workspace, "model", "fr_fr"); got != filepath.Join(workspace, "translations", "failures.fr_fr.v2.json") {
+		t.Fatalf("fr failure path = %q", got)
+	}
+}
+
 func TestTranslationCacheV2PrecedenceAndMalformedLegacyFailClosed(t *testing.T) {
 	workspace := t.TempDir()
 	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "One", "a")})

@@ -23,7 +23,7 @@ import (
 
 const (
 	translationSchema   = "modpack-translator.translations/v2"
-	translationPromptV1 = "en-es-es-minecraft-v1"
+	translationPromptV1 = "en-target-minecraft-v1"
 	defaultBatchSize    = 20
 	defaultBatchBytes   = 96 << 10
 	validationRetries   = 1
@@ -131,7 +131,7 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 	if err != nil {
 		return err
 	}
-	cachePath := translationCachePath(workspace, legacyOllamaModel)
+	cachePath := translationCachePath(workspace, legacyOllamaModel, catalog.TargetLocale)
 	cache, err := loadTranslationCacheV2(cachePath, legacyTranslationCachePath(workspace, legacyOllamaModel), legacyOllamaModel, catalog.TargetLocale)
 	if err != nil {
 		return err
@@ -178,7 +178,7 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 		if err := publishTranslationCache(cachePath, cache); err != nil {
 			return err
 		}
-		if err := os.Remove(translationFailureReportPath(workspace, legacyOllamaModel)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(translationFailureReportPath(workspace, legacyOllamaModel, catalog.TargetLocale)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove stale translation failure report: %w", err)
 		}
 		appendTranslationLog("done empty catalog")
@@ -265,7 +265,7 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 		byID := make(map[string]preparedTranslation, end-start)
 		for _, key := range keys[start:end] {
 			item := groups[key][0]
-			request := TranslationRequest{ID: item.entry.ID, Source: item.protected.Protected, SourceKind: item.entry.SourceKind, SourceFile: filepath.ToSlash(item.entry.SourceFile)}
+			request := TranslationRequest{ID: item.entry.ID, Source: item.protected.Protected, SourceKind: item.entry.SourceKind, SourceFile: filepath.ToSlash(item.entry.SourceFile), TargetLocale: catalog.TargetLocale}
 			requests = append(requests, request)
 			byID[request.ID] = item
 		}
@@ -278,7 +278,7 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 		appendTranslationLog("progress total=%d cached=%d translated=%d remaining=%d", len(prepared), cachedCount, translatedCount, len(prepared)-cachedCount-translatedCount)
 		fmt.Printf("Translation progress: total=%d cached=%d translated=%d remaining=%d\n", len(prepared), cachedCount, translatedCount, len(prepared)-cachedCount-translatedCount)
 	}
-	reportPath := translationFailureReportPath(workspace, legacyOllamaModel)
+	reportPath := translationFailureReportPath(workspace, legacyOllamaModel, catalog.TargetLocale)
 	cache.Entries = cacheEntriesInCatalogOrder(prepared, validByID)
 	if err := publishTranslationCache(cachePath, cache); err != nil {
 		return err
@@ -349,7 +349,10 @@ func loadCatalog(path string) (CatalogV1, error) {
 	if err := decodeStrictJSON(data, &catalog); err != nil {
 		return CatalogV1{}, fmt.Errorf("parse translation catalog: %w", err)
 	}
-	if catalog.Schema != catalogSchema || catalog.SourceLocale != sourceLanguageCode || catalog.TargetLocale != targetLanguageCode {
+	if catalog.Schema != catalogSchema || catalog.SourceLocale != sourceLanguageCode {
+		return CatalogV1{}, errors.New("translation catalog has unsupported schema or locales")
+	}
+	if normalized, ok := normalizeMinecraftLocale(catalog.TargetLocale); !ok || normalized != catalog.TargetLocale {
 		return CatalogV1{}, errors.New("translation catalog has unsupported schema or locales")
 	}
 	seen := make(map[string]bool, len(catalog.Entries))
@@ -470,12 +473,22 @@ func publishTranslationCache(path string, cache TranslationCacheV2) error {
 	return nil
 }
 
-func translationCachePath(workspace, model string) string {
-	return filepath.Join(workspace, "translations", "translations.v2.json")
+func translationCachePath(workspace, model string, targetLocale ...string) string {
+	locale := selectedTargetLocale(targetLocale...)
+	name := "translations.v2.json"
+	if locale != defaultTargetLanguageCode {
+		name = "translations." + locale + ".v2.json"
+	}
+	return filepath.Join(workspace, "translations", name)
 }
 
-func translationFailureReportPath(workspace, model string) string {
-	return filepath.Join(workspace, "translations", "failures.v2.json")
+func translationFailureReportPath(workspace, model string, targetLocale ...string) string {
+	locale := selectedTargetLocale(targetLocale...)
+	name := "failures.v2.json"
+	if locale != defaultTargetLanguageCode {
+		name = "failures." + locale + ".v2.json"
+	}
+	return filepath.Join(workspace, "translations", name)
 }
 
 func legacyTranslationCachePath(workspace, model string) string {

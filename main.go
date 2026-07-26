@@ -21,11 +21,12 @@ import (
 )
 
 const (
-	resourcePackName   = "ModpackTranslations"
-	outputDirectory    = "modpack-translator-output"
-	sourceLanguageCode = "en_us"
-	targetLanguageCode = "es_es"
-	pendingFileSuffix  = ".pending"
+	resourcePackName          = "ModpackTranslations"
+	outputDirectory           = "modpack-translator-output"
+	sourceLanguageCode        = "en_us"
+	defaultTargetLanguageCode = "es_es"
+	targetLanguageCode        = defaultTargetLanguageCode
+	pendingFileSuffix         = ".pending"
 )
 
 type PackMeta struct {
@@ -63,6 +64,10 @@ func runWithLanguageLimits(args []string, limits languageLimits) (err error) {
 	if err != nil {
 		return err
 	}
+	targetLocale, err := selectTargetLocale(os.Stdin, os.Stdout, os.Getenv)
+	if err != nil {
+		return err
+	}
 	logSession, err := startSessionLog(modpackPath)
 	if err != nil {
 		return err
@@ -93,7 +98,7 @@ func runWithLanguageLimits(args []string, limits languageLimits) (err error) {
 	}
 	fmt.Printf("Minecraft detectado: %s (resource pack format %d)\n", minecraftVersion, packFormat)
 
-	if err := prepareOutputs(workspacePath, exportPackPath, minecraftVersion, packFormat); err != nil {
+	if err := prepareOutputs(workspacePath, exportPackPath, minecraftVersion, packFormat, targetLocale); err != nil {
 		return err
 	}
 
@@ -104,14 +109,14 @@ func runWithLanguageLimits(args []string, limits languageLimits) (err error) {
 
 	fmt.Printf("Encontrados %d mods\n", len(jarFiles))
 	fmt.Printf("Refresh mode: %s\n", enabledDisabled(options.refresh))
-	extractor, err := newSourceExtractor(workspacePath)
+	extractor, err := newSourceExtractor(workspacePath, targetLocale)
 	if err != nil {
 		return err
 	}
 	extractor.refresh = options.refresh
 	defer extractor.abort()
 
-	languages := newLanguageAggregatorWithLimits(extractor.stageWorkspace, limits)
+	languages := newLanguageAggregatorWithLimits(extractor.stageWorkspace, limits, targetLocale)
 	languages.refresh = options.refresh
 	languages.force = options.force
 	for _, jarPath := range jarFiles {
@@ -134,7 +139,7 @@ func runWithLanguageLimits(args []string, limits languageLimits) (err error) {
 	if err := extractor.extractKubeJSLang(modpackPath); err != nil {
 		return fmt.Errorf("extract KubeJS language files: %w", err)
 	}
-	entryCount, _, err := buildCatalog(extractor.stageWorkspace)
+	entryCount, _, err := buildCatalog(extractor.stageWorkspace, targetLocale)
 	if err != nil {
 		return fmt.Errorf("build translation catalog: %w", err)
 	}
@@ -160,7 +165,7 @@ func runWithLanguageLimits(args []string, limits languageLimits) (err error) {
 		if err := translateWorkspace(context.Background(), workspacePath, model, translator, translationOptions{}); err != nil {
 			return err
 		}
-		fmt.Printf("Validated translations cached at:\n%s\n", translationCachePath(workspacePath, model))
+		fmt.Printf("Validated translations cached at:\n%s\n", translationCachePath(workspacePath, model, targetLocale))
 		if _, err := writebackWorkspace(modpackPath); err != nil {
 			return err
 		}
@@ -177,17 +182,18 @@ func outputPaths(modpackPath string) (workspacePath, exportPackPath string) {
 	return filepath.Join(root, "workspace"), filepath.Join(root, "export", "overrides", "resourcepacks", resourcePackName)
 }
 
-func prepareOutputs(workspacePath, exportPackPath, minecraftVersion string, packFormat int) error {
+func prepareOutputs(workspacePath, exportPackPath, minecraftVersion string, packFormat int, targetLocale ...string) error {
 	if err := os.MkdirAll(workspacePath, 0755); err != nil {
 		return fmt.Errorf("crear workspace de traducción: %w", err)
 	}
-	if err := removePendingExportFiles(exportPackPath); err != nil {
+	if err := removePendingExportFiles(exportPackPath, targetLocale...); err != nil {
 		return err
 	}
 	return createPackMetadata(exportPackPath, minecraftVersion, packFormat)
 }
 
-func removePendingExportFiles(exportPackPath string) error {
+func removePendingExportFiles(exportPackPath string, targetLocale ...string) error {
+	pendingName := pendingTranslationFileName(targetLocale...)
 	err := filepath.WalkDir(exportPackPath, func(path string, entry os.DirEntry, err error) error {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -203,7 +209,7 @@ func removePendingExportFiles(exportPackPath string) error {
 			return err
 		}
 		_, language, isLanguageFile := languageFile(filepath.ToSlash(relativePath))
-		if isLanguageFile && language == pendingTranslationFileName() {
+		if isLanguageFile && language == pendingName {
 			if err := os.Remove(path); err != nil {
 				return fmt.Errorf("eliminar archivo pendiente obsoleto del export: %w", err)
 			}
@@ -441,15 +447,16 @@ type parsedSourceLanguage struct {
 }
 
 type languageAggregator struct {
-	outputPath  string
-	byNamespace map[string]*namespaceLanguages
-	budget      languageBudget
-	refresh     bool
-	force       bool
+	outputPath   string
+	byNamespace  map[string]*namespaceLanguages
+	budget       languageBudget
+	refresh      bool
+	force        bool
+	targetLocale string
 }
 
 func newLanguageAggregator(outputPath string) *languageAggregator {
-	return newLanguageAggregatorWithLimits(outputPath, defaultLanguageLimits())
+	return newLanguageAggregatorWithLimits(outputPath, defaultLanguageLimits(), defaultTargetLanguageCode)
 }
 
 type languageLimits struct {
@@ -469,11 +476,12 @@ func defaultLanguageLimits() languageLimits {
 	return languageLimits{files: maxPendingSourceFiles, bytes: maxPendingSourceTotal, members: maxCatalogEntries}
 }
 
-func newLanguageAggregatorWithLimits(outputPath string, limits languageLimits) *languageAggregator {
+func newLanguageAggregatorWithLimits(outputPath string, limits languageLimits, targetLocale ...string) *languageAggregator {
 	return &languageAggregator{
-		outputPath:  outputPath,
-		byNamespace: make(map[string]*namespaceLanguages),
-		budget:      languageBudget{limits: limits},
+		outputPath:   outputPath,
+		byNamespace:  make(map[string]*namespaceLanguages),
+		budget:       languageBudget{limits: limits},
+		targetLocale: selectedTargetLocale(targetLocale...),
 	}
 }
 
@@ -534,7 +542,7 @@ func (a *languageAggregator) addJar(jarPath string) error {
 			byNamespace[namespace] = files
 		}
 
-		if language != sourceLanguageFileName() && language != targetLanguageFileName() {
+		if language != sourceLanguageFileName() && language != targetLanguageFileName(a.targetLocale) {
 			continue
 		}
 
@@ -545,7 +553,7 @@ func (a *languageAggregator) addJar(jarPath string) error {
 		if err := a.budget.accountBytes(uint64(len(data)), jarPath, file.Name); err != nil {
 			return err
 		}
-		if language == targetLanguageFileName() {
+		if language == targetLanguageFileName(a.targetLocale) {
 			keys, members, err := collectTargetLanguageKeys(data)
 			if err != nil {
 				if !a.force {
@@ -586,13 +594,13 @@ func (a *languageAggregator) addJar(jarPath string) error {
 			}
 		}
 		if len(files.targets) > 0 {
-			fmt.Printf("[OK] %s/%s: %s existente\n", filepath.Base(jarPath), namespace, targetLanguageFileName())
+			fmt.Printf("[OK] %s/%s: %s existente\n", filepath.Base(jarPath), namespace, targetLanguageFileName(a.targetLocale))
 		}
 		for _, source := range files.sources {
 			namespaceFiles.sources = append(namespaceFiles.sources, languageSource{jar: jarPath, values: source.values, duplicates: source.duplicates, nonStrings: source.nonStrings})
 		}
 		if len(files.targets) == 0 && len(files.sources) == 0 {
-			fmt.Printf("[SKIP] %s/%s: sin %s ni %s\n", filepath.Base(jarPath), namespace, targetLanguageFileName(), sourceLanguageFileName())
+			fmt.Printf("[SKIP] %s/%s: sin %s ni %s\n", filepath.Base(jarPath), namespace, targetLanguageFileName(a.targetLocale), sourceLanguageFileName())
 		}
 	}
 
@@ -787,10 +795,10 @@ func (a *languageAggregator) publish() error {
 			return fmt.Errorf("marshal pending language for namespace %q: %w", namespace, err)
 		}
 		data = append(data, '\n')
-		if err := savePendingTranslationFile(a.outputPath, namespace, data); err != nil {
+		if err := savePendingTranslationFile(a.outputPath, namespace, a.targetLocale, data); err != nil {
 			return err
 		}
-		fmt.Printf("[PENDING] %s: assets/%s/lang/%s\n", namespace, namespace, pendingTranslationFileName())
+		fmt.Printf("[PENDING] %s: assets/%s/lang/%s\n", namespace, namespace, pendingTranslationFileName(a.targetLocale))
 	}
 	return nil
 }
@@ -811,12 +819,19 @@ func sourceLanguageFileName() string {
 	return sourceLanguageCode + ".json"
 }
 
-func targetLanguageFileName() string {
-	return targetLanguageCode + ".json"
+func targetLanguageFileName(targetLocale ...string) string {
+	return selectedTargetLocale(targetLocale...) + ".json"
 }
 
-func pendingTranslationFileName() string {
-	return targetLanguageCode + pendingFileSuffix + ".json"
+func pendingTranslationFileName(targetLocale ...string) string {
+	return selectedTargetLocale(targetLocale...) + pendingFileSuffix + ".json"
+}
+
+func selectedTargetLocale(targetLocale ...string) string {
+	if len(targetLocale) > 0 && targetLocale[0] != "" {
+		return targetLocale[0]
+	}
+	return defaultTargetLanguageCode
 }
 
 func enabledDisabled(enabled bool) string {
@@ -833,6 +848,7 @@ func readLanguageFile(file *zip.File) ([]byte, error) {
 func savePendingTranslationFile(
 	outputPath string,
 	namespace string,
+	targetLocale string,
 	data []byte,
 ) error {
 	destinationDir := filepath.Join(outputPath, "assets", namespace, "lang")
@@ -840,7 +856,7 @@ func savePendingTranslationFile(
 		return fmt.Errorf("crear carpeta de fuentes pendientes: %w", err)
 	}
 
-	destinationPath := filepath.Join(destinationDir, pendingTranslationFileName())
+	destinationPath := filepath.Join(destinationDir, pendingTranslationFileName(targetLocale))
 	if err := os.WriteFile(destinationPath, data, 0644); err != nil {
 		return fmt.Errorf("guardar fuente pendiente de %s: %w", namespace, err)
 	}

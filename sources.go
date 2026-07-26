@@ -33,9 +33,10 @@ type sourceExtractor struct {
 	bytes          int64
 	counts         sourceCounts
 	refresh        bool
+	targetLocale   string
 }
 
-func newSourceExtractor(workspacePath string) (*sourceExtractor, error) {
+func newSourceExtractor(workspacePath string, targetLocale ...string) (*sourceExtractor, error) {
 	if err := os.MkdirAll(workspacePath, 0755); err != nil {
 		return nil, fmt.Errorf("create source workspace: %w", err)
 	}
@@ -50,7 +51,7 @@ func newSourceExtractor(workspacePath string) (*sourceExtractor, error) {
 			return nil, fmt.Errorf("create staged workspace: %w", err)
 		}
 	}
-	return &sourceExtractor{stageWorkspace: stageWorkspace, stageRoot: stageRoot}, nil
+	return &sourceExtractor{stageWorkspace: stageWorkspace, stageRoot: stageRoot, targetLocale: selectedTargetLocale(targetLocale...)}, nil
 }
 
 func (e *sourceExtractor) abort() {
@@ -247,7 +248,7 @@ func (e *sourceExtractor) extractKubeJSLang(modpackPath string) error {
 		if len(parts) != 3 || parts[0] == "" || parts[1] != "lang" || parts[2] != sourceLanguageCode+".json" {
 			return false
 		}
-		return e.refresh || !regularFile(filepath.Join(root, parts[0], "lang", targetLanguageCode+".json"))
+		return e.refresh || !regularFile(filepath.Join(root, parts[0], "lang", targetLanguageFileName(e.targetLocale)))
 	}, func(relative string, data []byte) error {
 		if err := e.write(filepath.Join("kubejs", "assets", relative), data); err != nil {
 			return err

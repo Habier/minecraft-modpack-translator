@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -104,6 +105,96 @@ func TestWorkspaceWritesTranslatedOverridesAndDeterministicZip(t *testing.T) {
 	}
 	if secondZip := readFile(t, zipPath); !bytes.Equal(secondZip, firstZip) {
 		t.Fatal("ZIP bytes changed between identical writeback runs")
+	}
+}
+
+func TestWorkspaceUsesCatalogTargetLocaleForOutputs(t *testing.T) {
+	modpack := t.TempDir()
+	workspace := filepath.Join(modpack, OutputDirectory, "workspace")
+	writeTestFiles(t, map[string][]byte{
+		filepath.Join(workspace, "catalog", "catalog.v1.json"): []byte(`{
+  "schema": "modpack-translator.catalog/v1",
+  "source_locale": "en_us",
+  "target_locale": "fr_fr",
+  "entries": [
+    {"id":"std","source_kind":"standard_lang","source_file":"assets/example/lang/fr_fr.pending.json","locator":"/item.example.name","source":"Example","target_locale":"fr_fr","tokens":[],"writeback":{"format":"json","value_type":"string","container":"object","source_file_sha256":"","encoding":"UTF-8"}}
+  ]
+}`),
+		filepath.Join(workspace, "translations", "translations.fr_fr.v2.json"): []byte(`{
+  "schema": "modpack-translator.translations/v2",
+  "target_locale": "fr_fr",
+  "prompt_version": "test",
+  "entries": [
+    {"id":"std","translation":"Exemple"}
+  ]
+}`),
+	})
+
+	zipPath, err := Workspace(modpack)
+	if err != nil {
+		t.Fatalf("writeback workspace: %v", err)
+	}
+	if filepath.Base(zipPath) != "modpack-translations-fr_fr.zip" {
+		t.Fatalf("zip path = %s", zipPath)
+	}
+	assertFileContent(t,
+		filepath.Join(modpack, OutputDirectory, "export", "overrides", "resourcepacks", ResourcePackName, "assets", "example", "lang", "fr_fr.json"),
+		"{\n  \"item.example.name\": \"Exemple\"\n}\n",
+	)
+}
+
+func TestWorkspaceRejectsUnsupportedTargetLocaleBeforePathUse(t *testing.T) {
+	tests := []struct {
+		name          string
+		catalogLocale string
+		cacheLocale   string
+		cacheFile     string
+	}{
+		{
+			name:          "catalog path traversal locale",
+			catalogLocale: `../evil`,
+		},
+		{
+			name:          "cache path traversal locale",
+			catalogLocale: "fr_fr",
+			cacheLocale:   `../evil`,
+			cacheFile:     "translations.fr_fr.v2.json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			modpack := t.TempDir()
+			workspace := filepath.Join(modpack, OutputDirectory, "workspace")
+			files := map[string][]byte{
+				filepath.Join(workspace, "catalog", "catalog.v1.json"): []byte(`{
+  "schema": "modpack-translator.catalog/v1",
+  "source_locale": "en_us",
+  "target_locale": ` + strconv.Quote(tt.catalogLocale) + `,
+  "entries": []
+}`),
+			}
+			if tt.cacheFile != "" {
+				files[filepath.Join(workspace, "translations", tt.cacheFile)] = []byte(`{
+  "schema": "modpack-translator.translations/v2",
+  "target_locale": ` + strconv.Quote(tt.cacheLocale) + `,
+  "prompt_version": "test",
+  "entries": []
+}`)
+			}
+			writeTestFiles(t, files)
+
+			_, err := Workspace(modpack)
+			if err == nil || !strings.Contains(err.Error(), "unsupported Minecraft target locale") {
+				t.Fatalf("Workspace() error = %v, want unsupported Minecraft target locale", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(modpack, OutputDirectory, "export", "overrides")); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("export overrides stat error = %v, want not exist", statErr)
+			}
+			if _, statErr := os.Stat(filepath.Join(modpack, OutputDirectory, "evil.v2.json")); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("path traversal cache stat error = %v, want not exist", statErr)
+			}
+		})
 	}
 }
 

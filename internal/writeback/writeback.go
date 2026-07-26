@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"modpack-translator/internal/minecraftlocale"
 )
 
 const (
@@ -38,17 +40,18 @@ func Workspace(modpackPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := writeStandardLang(paths.exportPack, plan.standardLang); err != nil {
+	paths.zipPath = ZipPath(modpackPath, plan.targetLocale)
+	if err := writeStandardLang(paths.exportPack, plan.targetLocale, plan.standardLang); err != nil {
 		return "", err
 	}
-	if err := writeKubeJSLang(paths.workspace, paths.exportOverrides, plan.kubeJSLang); err != nil {
+	if err := writeKubeJSLang(paths.workspace, paths.exportOverrides, plan.targetLocale, plan.kubeJSLang); err != nil {
 		return "", err
 	}
 	if err := writeFTBQuests(paths.workspace, paths.exportOverrides, plan.ftbQuestSNBT); err != nil {
 		return "", err
 	}
 	if len(plan.patchouli) > 0 {
-		if err := writePatchouli(paths.workspace, paths.exportPack, plan.patchouli, plan.translated); err != nil {
+		if err := writePatchouli(paths.workspace, paths.exportPack, plan.targetLocale, plan.patchouli, plan.translated); err != nil {
 			return "", fmt.Errorf("writing Patchouli files: %w", err)
 		}
 	}
@@ -70,13 +73,31 @@ func PrintSharingInstructions(zipPath string) {
 	fmt.Println("  2. Enable 'ModpackTranslations' in-game (Options > Resource Packs)")
 }
 
-func ZipPath(modpackPath string) string {
-	return filepath.Join(modpackPath, OutputDirectory, "export", ZipName)
+func ZipNameFor(targetLocale string) string {
+	if targetLocale == "" {
+		targetLocale = TargetLang
+	}
+	return "modpack-translations-" + targetLocale + ".zip"
+}
+
+func ZipPath(modpackPath string, targetLocale ...string) string {
+	locale := TargetLang
+	if len(targetLocale) > 0 && targetLocale[0] != "" {
+		locale = targetLocale[0]
+	}
+	return filepath.Join(modpackPath, OutputDirectory, "export", ZipNameFor(locale))
 }
 
 func RemoveStaleZip(modpackPath string) error {
-	if err := os.Remove(ZipPath(modpackPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("removing stale ZIP: %w", err)
+	pattern := filepath.Join(modpackPath, OutputDirectory, "export", "modpack-translations-*.zip")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("resolving stale ZIPs: %w", err)
+	}
+	for _, path := range matches {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("removing stale ZIP: %w", err)
+		}
 	}
 	return nil
 }
@@ -99,6 +120,7 @@ func newWritebackPaths(modpackPath string) writebackPaths {
 }
 
 type writebackPlan struct {
+	targetLocale string
 	translated   map[string]string
 	standardLang map[string]map[string]string
 	kubeJSLang   map[string]map[string]string
@@ -108,17 +130,28 @@ type writebackPlan struct {
 
 func loadWritebackPlan(paths writebackPaths) (writebackPlan, error) {
 	catalogPath := filepath.Join(paths.workspace, "catalog", "catalog.v1.json")
-	cachePath := filepath.Join(paths.workspace, "translations", "translations.v2.json")
 
 	catalog, err := loadCatalog(catalogPath)
 	if err != nil {
 		return writebackPlan{}, fmt.Errorf("loading catalog: %w", err)
 	}
+	targetLocale, ok := minecraftlocale.Normalize(catalog.TargetLocale)
+	if !ok {
+		return writebackPlan{}, fmt.Errorf("unsupported Minecraft target locale %q", catalog.TargetLocale)
+	}
 	fmt.Printf("Catalog: %d entries\n", len(catalog.Entries))
 
+	cachePath := translationCachePath(paths.workspace, targetLocale)
 	cache, err := loadTranslationCache(cachePath)
 	if err != nil {
 		return writebackPlan{}, fmt.Errorf("loading translations: %w", err)
+	}
+	cacheTargetLocale, ok := minecraftlocale.Normalize(cache.TargetLocale)
+	if !ok {
+		return writebackPlan{}, fmt.Errorf("unsupported Minecraft target locale %q", cache.TargetLocale)
+	}
+	if catalog.SourceLocale != SourceLang || cacheTargetLocale != targetLocale {
+		return writebackPlan{}, fmt.Errorf("catalog/cache locale metadata mismatch")
 	}
 	fmt.Printf("Translations: %d entries\n", len(cache.Entries))
 
@@ -128,6 +161,7 @@ func loadWritebackPlan(paths writebackPaths) (writebackPlan, error) {
 	}
 
 	plan := writebackPlan{
+		targetLocale: targetLocale,
 		translated:   translated,
 		standardLang: make(map[string]map[string]string),
 		kubeJSLang:   make(map[string]map[string]string),
@@ -206,7 +240,7 @@ func loadWritebackPlan(paths writebackPaths) (writebackPlan, error) {
 	return plan, nil
 }
 
-func writeStandardLang(exportPack string, nsGroups map[string]map[string]string) error {
+func writeStandardLang(exportPack, targetLocale string, nsGroups map[string]map[string]string) error {
 	nsList := make([]string, 0, len(nsGroups))
 	for ns := range nsGroups {
 		nsList = append(nsList, ns)
@@ -218,7 +252,7 @@ func writeStandardLang(exportPack string, nsGroups map[string]map[string]string)
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("creating standard language directory %s: %w", dir, err)
 		}
-		path := filepath.Join(dir, TargetLang+".json")
+		path := filepath.Join(dir, targetLocale+".json")
 		values := nsGroups[ns]
 		data, err := json.MarshalIndent(values, "", "  ")
 		if err != nil {
@@ -233,7 +267,7 @@ func writeStandardLang(exportPack string, nsGroups map[string]map[string]string)
 	return nil
 }
 
-func writeKubeJSLang(workspace, exportOverrides string, kubeJSLang map[string]map[string]string) error {
+func writeKubeJSLang(workspace, exportOverrides, targetLocale string, kubeJSLang map[string]map[string]string) error {
 	if len(kubeJSLang) == 0 {
 		return nil
 	}
@@ -257,7 +291,7 @@ func writeKubeJSLang(workspace, exportOverrides string, kubeJSLang map[string]ma
 		if ns == "" {
 			return fmt.Errorf("cannot extract KubeJS namespace from %q", sourceFile)
 		}
-		path := filepath.Join(exportOverrides, "kubejs", "assets", ns, "lang", TargetLang+".json")
+		path := filepath.Join(exportOverrides, "kubejs", "assets", ns, "lang", targetLocale+".json")
 		out, err := marshalOrderedStringObject(keys, values)
 		if err != nil {
 			return fmt.Errorf("marshaling KubeJS language file %s: %w", path, err)
@@ -456,7 +490,7 @@ type fieldInfo struct {
 	sourceHash  string
 }
 
-func writePatchouli(workspace, exportPack string, entries []patchouliWriteback, translated map[string]string) error {
+func writePatchouli(workspace, exportPack, targetLocale string, entries []patchouliWriteback, translated map[string]string) error {
 	type filePatch struct {
 		sourceFile string
 		fields     map[string]string
@@ -493,7 +527,7 @@ func writePatchouli(workspace, exportPack string, entries []patchouliWriteback, 
 			}
 		}
 
-		exportPath, err := patchouliExportPath(fp.sourceFile, exportPack)
+		exportPath, err := patchouliExportPath(fp.sourceFile, exportPack, targetLocale)
 		if err != nil {
 			return fmt.Errorf("resolve export path for %s: %w", fp.sourceFile, err)
 		}
@@ -515,7 +549,7 @@ func writePatchouli(workspace, exportPack string, entries []patchouliWriteback, 
 	return nil
 }
 
-func patchouliExportPath(sourceFile, exportPack string) (string, error) {
+func patchouliExportPath(sourceFile, exportPack, targetLocale string) (string, error) {
 	sf := filepath.ToSlash(sourceFile)
 	parts := strings.Split(sf, "/")
 
@@ -526,7 +560,7 @@ func patchouliExportPath(sourceFile, exportPack string) (string, error) {
 			remaining := parts[i+2:]
 			for j, p := range remaining {
 				if p == SourceLang || strings.HasPrefix(p, SourceLang+"/") {
-					remaining[j] = TargetLang + strings.TrimPrefix(p, SourceLang)
+					remaining[j] = targetLocale + strings.TrimPrefix(p, SourceLang)
 					break
 				}
 			}
@@ -540,7 +574,7 @@ func patchouliExportPath(sourceFile, exportPack string) (string, error) {
 		relParts := parts[3:]
 		for i, p := range relParts {
 			if p == SourceLang || strings.HasPrefix(p, SourceLang+"/") {
-				relParts[i] = TargetLang + strings.TrimPrefix(p, SourceLang)
+				relParts[i] = targetLocale + strings.TrimPrefix(p, SourceLang)
 			}
 		}
 		rel := filepath.Join(relParts...)
@@ -1158,4 +1192,12 @@ func loadTranslationCache(path string) (*translationCacheV2, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return &cache, nil
+}
+
+func translationCachePath(workspace, targetLocale string) string {
+	name := "translations.v2.json"
+	if targetLocale != TargetLang {
+		name = "translations." + targetLocale + ".v2.json"
+	}
+	return filepath.Join(workspace, "translations", name)
 }
