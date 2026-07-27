@@ -2,9 +2,11 @@
 
 Translate Minecraft Java modpacks to a selected Minecraft locale.
 
-It extracts translatable text from supported modpack sources, translates it with any OpenAI compatible provider, including free ones, and creates a ready-to-share ZIP for the selected locale.
+It extracts translatable text from supported modpack sources, translates it with any OpenAI-compatible provider, including free options, and creates a ready-to-share resource pack ZIP for the selected locale.
 
 > **Most users:** use a compiled release and follow the [Installation and User Guide](docs/INSTALLATION.md). You do not need Go.
+
+Looking for free AI providers? Any OpenAI-compatible API can work as long as you have an API key and configure it in `PROVIDER_CHAIN`. The [awesome-freellm-apis](https://github.com/open-free-llm-api/awesome-freellm-apis) list is a useful starting point.
 
 ## Basic usage
 
