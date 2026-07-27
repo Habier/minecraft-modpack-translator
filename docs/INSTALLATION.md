@@ -2,7 +2,7 @@
 
 Use this guide if you want to run Modpack Translator from a compiled release. You do not need Go.
 
-Modpack Translator translates supported Minecraft Java modpack text to Spanish and creates a shareable `es_es` resource pack ZIP.
+Modpack Translator translates supported Minecraft Java modpack text to a selected locale and creates a shareable resource pack ZIP. If you press Enter at the locale prompt, the default target locale is `es_es`.
 
 ## Quick start
 
@@ -24,10 +24,10 @@ Modpack Translator translates supported Minecraft Java modpack text to Spanish a
    ./modpack-translator --translate "/path/to/your/modpack"
    ```
 
-6. Use the generated ZIP:
+6. Use the generated ZIP for the selected locale:
 
    ```text
-   <modpack>/modpack-translator-output/export/modpack-translations-es_es.zip
+   <modpack>/modpack-translator-output/export/modpack-translations-<locale>.zip
    ```
 
 ## Automatic modpack selection
@@ -49,7 +49,7 @@ It checks folders that contain a `mods` directory. It does not scan entire drive
 | Modpack folder | Must contain a `mods` directory |
 | Minecraft metadata | `mmc-pack.json` or `manifest.json` |
 | Translation provider | Cloud provider keys or local Ollama |
-| Output language | Spanish `es_es` |
+| Output language | Prompted target locale; default is `es_es` |
 
 Use an installed/extracted modpack folder, not a downloaded modpack ZIP.
 
@@ -62,7 +62,7 @@ Use an installed/extracted modpack folder, not a downloaded modpack ZIP.
 | FTB Quests `.snbt` files | Supported |
 | FTB Quests JSON5 language files | Supported |
 | KubeJS language files | Supported |
-| Existing `es_es` files inside mods | Left untouched |
+| Existing target-language files inside mods | Read to skip already translated keys unless `--refresh`; original JARs are not modified |
 
 ## Minecraft versions
 
@@ -148,7 +148,7 @@ If `PROVIDER_CHAIN` is unset, the tool uses local Ollama only. This is a breakin
 
 ### Configure cloud providers
 
-Create a `.env` file beside the compiled binary, or set variables in your terminal.
+Create a `.env` file beside the compiled binary, create one in your current working directory, or set variables in your terminal. When the executable directory and current working directory differ, both `.env` locations are loaded.
 
 Example `.env` entries:
 
@@ -219,6 +219,24 @@ Linux/macOS:
 ./modpack-translator "/path/to/your/modpack"
 ```
 
+## Refreshing existing translations
+
+By default, existing target-language files are read so already-covered keys can be skipped. To re-extract and overwrite those generated target entries, add `--refresh`:
+
+Windows PowerShell:
+
+```powershell
+.\modpack-translator.exe --translate --refresh "C:\path\to\your\modpack"
+```
+
+Linux/macOS:
+
+```bash
+./modpack-translator --translate --refresh "/path/to/your/modpack"
+```
+
+Malformed target-language files fail extraction unless you also use `--force`. `--force` only continues past malformed existing target-language files; source language files still fail because they are the extraction source of truth.
+
 ## Output
 
 The tool writes files inside the selected modpack folder:
@@ -231,13 +249,15 @@ The tool writes files inside the selected modpack folder:
     │   └── translations/translations.v2.json
     └── export/
         ├── overrides/
-        └── modpack-translations-es_es.zip
+        │   └── resourcepacks/
+        │       └── ModpackTranslations/
+        └── modpack-translations-<locale>.zip
 ```
 
 Use either:
 
-- `modpack-translator-output/export/modpack-translations-es_es.zip`
-- `modpack-translator-output/export/overrides/`
+- `modpack-translator-output/export/modpack-translations-<locale>.zip`
+- `modpack-translator-output/export/overrides/resourcepacks/ModpackTranslations/`
 
 Do not distribute `workspace/`. It contains working files, cache, and failure reports.
 
