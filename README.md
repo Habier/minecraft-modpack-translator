@@ -2,7 +2,7 @@
 
 Translate Minecraft Java modpacks to a selected Minecraft locale.
 
-Modpack Translator extracts translatable text from supported modpack sources, translates it with configured providers, and creates a ready-to-share resource pack ZIP for the selected locale. If you press Enter at the locale prompt, the default target locale is `es_es`.
+It extracts translatable text from supported modpack sources, translates it with any OpenAI compatible provider, including free ones, and creates a ready-to-share ZIP for the selected locale.
 
 > **Most users:** use a compiled release and follow the [Installation and User Guide](docs/INSTALLATION.md). You do not need Go.
 
