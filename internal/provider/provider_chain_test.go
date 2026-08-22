@@ -1,4 +1,4 @@
-package main
+package provider
 
 import (
 	"context"
@@ -431,6 +431,14 @@ type scriptedTranslator struct {
 	identity ProviderIdentity
 	calls    int
 	errors   []error
+}
+
+func validTranslationResults(requests []TranslationRequest) []TranslationResult {
+	results := make([]TranslationResult, len(requests))
+	for i, request := range requests {
+		results[i] = TranslationResult{ID: request.ID, Translated: request.Source}
+	}
+	return results
 }
 
 func (s *scriptedTranslator) ProviderIdentity() ProviderIdentity { return s.identity }

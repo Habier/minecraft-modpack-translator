@@ -1,4 +1,4 @@
-package main
+package provider
 
 import (
 	"bytes"
@@ -190,14 +190,6 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
-}
-
-func translationSchemaFor(count int, arrayLength bool) map[string]any {
-	results := map[string]any{"type": "array", "items": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"id", "translated"}, "properties": map[string]any{"id": map[string]any{"type": "string"}, "translated": map[string]any{"type": "string"}}}}
-	if arrayLength {
-		results["minItems"], results["maxItems"] = count, count
-	}
-	return map[string]any{"type": "object", "additionalProperties": false, "required": []string{"results"}, "properties": map[string]any{"results": results}}
 }
 
 func translationPrompt(items []TranslationRequest) (string, error) {
@@ -468,6 +460,7 @@ type chainTranslator struct {
 	providers []Translator
 	current   int
 	output    io.Writer
+	logf      func(string, ...any)
 }
 
 func (c *chainTranslator) Translate(ctx context.Context, items []TranslationRequest) (TranslationBatch, error) {
@@ -483,7 +476,7 @@ func (c *chainTranslator) Translate(ctx context.Context, items []TranslationRequ
 		if !errors.As(err, &providerErr) {
 			return TranslationBatch{}, err
 		}
-		appendTranslationLog("provider %s model %s entries=%d kind=%s reason=%s", providerErr.Identity.Provider, providerErr.Identity.Model, len(items), providerErr.Kind, safeTransitionReason(providerErr))
+		c.log("provider %s model %s entries=%d kind=%s reason=%s", providerErr.Identity.Provider, providerErr.Identity.Model, len(items), providerErr.Kind, safeTransitionReason(providerErr))
 		exhausted = append(exhausted, providerErr.Identity.Provider)
 		c.current++
 		if c.current < len(c.providers) {
@@ -491,8 +484,14 @@ func (c *chainTranslator) Translate(ctx context.Context, items []TranslationRequ
 			fmt.Fprintf(c.writer(), "Provider transition: %s -> %s kind=%s reason=%s\n", providerErr.Identity.Provider, next.Provider, providerErr.Kind, safeTransitionReason(providerErr))
 		}
 	}
-	appendTranslationLog("chain exhausted providers=%s", strings.Join(exhausted, ", "))
+	c.log("chain exhausted providers=%s", strings.Join(exhausted, ", "))
 	return TranslationBatch{}, &ProviderError{Identity: ProviderIdentity{Provider: "translation chain"}, Kind: ErrorQuota, Reason: "configured providers exhausted: " + strings.Join(exhausted, ", ")}
+}
+
+func (c *chainTranslator) log(format string, args ...any) {
+	if c.logf != nil {
+		c.logf(format, args...)
+	}
 }
 
 func (c *chainTranslator) writer() io.Writer {
@@ -559,6 +558,20 @@ func providerChainSummary(getenv func(string) string) string {
 }
 
 func buildTranslatorChain(getenv func(string) string) (Translator, string, error) {
+	return buildTranslatorChainWithLogger(getenv, nil)
+}
+
+// BuildChain builds the configured provider chain and returns the model used
+// for the existing root cache-path compatibility behavior.
+func BuildChain(getenv func(string) string, logf ...func(string, ...any)) (Translator, string, error) {
+	var logger func(string, ...any)
+	if len(logf) > 0 {
+		logger = logf[0]
+	}
+	return buildTranslatorChainWithLogger(getenv, logger)
+}
+
+func buildTranslatorChainWithLogger(getenv func(string) string, logf func(string, ...any)) (Translator, string, error) {
 	entries, err := providerChainFromEnv(getenv)
 	if err != nil {
 		return nil, "", err
@@ -587,5 +600,10 @@ func buildTranslatorChain(getenv func(string) string) (Translator, string, error
 	if len(providers) == 0 {
 		return nil, "", fmt.Errorf("PROVIDER_CHAIN must include at least one provider")
 	}
-	return &chainTranslator{providers: providers}, cacheModel, nil
+	return &chainTranslator{providers: providers, logf: logf}, cacheModel, nil
+}
+
+// ChainSummary describes configured providers without exposing credentials.
+func ChainSummary(getenv func(string) string) string {
+	return providerChainSummary(getenv)
 }

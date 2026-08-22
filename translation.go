@@ -208,7 +208,10 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 				lastIdentity = batch.Identity
 			}
 			if err != nil {
-				var invalid *invalidTranslationResponseError
+				var invalid interface {
+					error
+					InvalidResponse()
+				}
 				if !errors.As(err, &invalid) {
 					appendTranslationLog("fatal provider=%s model=%s entries=%d err=%s", lastIdentity.Provider, lastIdentity.Model, len(requests), err)
 					return err
