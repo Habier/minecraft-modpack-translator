@@ -155,15 +155,15 @@ func runWithLanguageLimits(args []string, limits languageLimits) (err error) {
 	fmt.Printf("\nTranslation workspace (pending files):\n%s\n", workspacePath)
 	fmt.Printf("\nExport resource pack (metadata and completed translations only):\n%s\n", exportPackPath)
 	if options.translate {
-		translator, model, err := provider.BuildChain(os.Getenv, appendTranslationLog)
+		translator, _, err := provider.BuildChain(os.Getenv, appendTranslationLog)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("\n%s\nTranslating catalog with the configured provider chain\n", provider.ChainSummary(os.Getenv))
-		if err := translateWorkspace(context.Background(), workspacePath, model, translator, translationOptions{}); err != nil {
+		if err := translateWorkspace(context.Background(), workspacePath, translator, translationOptions{}); err != nil {
 			return err
 		}
-		fmt.Printf("Validated translations cached at:\n%s\n", translationCachePath(workspacePath, model, targetLocale))
+		fmt.Printf("Validated translations cached at:\n%s\n", translationCachePath(workspacePath, targetLocale))
 		if _, err := writebackWorkspace(modpackPath); err != nil {
 			return err
 		}

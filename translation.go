@@ -30,15 +30,6 @@ const (
 	maxCatalogFileBytes = 320 << 20
 )
 
-type TranslationCacheV1 struct {
-	Schema        string                    `json:"schema"`
-	Provider      string                    `json:"provider"`
-	Model         string                    `json:"model"`
-	TargetLocale  string                    `json:"target_locale"`
-	PromptVersion string                    `json:"prompt_version"`
-	Entries       []TranslationCacheEntryV1 `json:"entries"`
-}
-
 type TranslationCacheV2 struct {
 	Schema        string                    `json:"schema"`
 	TargetLocale  string                    `json:"target_locale"`
@@ -55,15 +46,6 @@ type TranslationCacheEntryV2 struct {
 	TranslationSHA256 string `json:"translation_sha256"`
 	Provider          string `json:"provider"`
 	Model             string `json:"model"`
-}
-
-type TranslationCacheEntryV1 struct {
-	ID                string `json:"id"`
-	CacheKey          string `json:"cache_key"`
-	SourceSHA256      string `json:"source_sha256"`
-	TokenSignature    string `json:"token_signature"`
-	Translation       string `json:"translation"`
-	TranslationSHA256 string `json:"translation_sha256"`
 }
 
 type translationOptions struct {
@@ -120,7 +102,7 @@ type preparedTranslation struct {
 	tokenSignature string
 }
 
-func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string, translator Translator, options translationOptions) error {
+func translateWorkspace(ctx context.Context, workspace string, translator Translator, options translationOptions) error {
 	if options.BatchSize <= 0 {
 		options.BatchSize = defaultBatchSize
 	}
@@ -131,8 +113,8 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 	if err != nil {
 		return err
 	}
-	cachePath := translationCachePath(workspace, legacyOllamaModel, catalog.TargetLocale)
-	cache, err := loadTranslationCacheV2(cachePath, legacyTranslationCachePath(workspace, legacyOllamaModel), legacyOllamaModel, catalog.TargetLocale)
+	cachePath := translationCachePath(workspace, catalog.TargetLocale)
+	cache, err := loadTranslationCacheV2(cachePath, catalog.TargetLocale)
 	if err != nil {
 		return err
 	}
@@ -178,7 +160,7 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 		if err := publishTranslationCache(cachePath, cache); err != nil {
 			return err
 		}
-		if err := os.Remove(translationFailureReportPath(workspace, legacyOllamaModel, catalog.TargetLocale)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(translationFailureReportPath(workspace, catalog.TargetLocale)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove stale translation failure report: %w", err)
 		}
 		appendTranslationLog("done empty catalog")
@@ -281,7 +263,7 @@ func translateWorkspace(ctx context.Context, workspace, legacyOllamaModel string
 		appendTranslationLog("progress total=%d cached=%d translated=%d remaining=%d", len(prepared), cachedCount, translatedCount, len(prepared)-cachedCount-translatedCount)
 		fmt.Printf("Translation progress: total=%d cached=%d translated=%d remaining=%d\n", len(prepared), cachedCount, translatedCount, len(prepared)-cachedCount-translatedCount)
 	}
-	reportPath := translationFailureReportPath(workspace, legacyOllamaModel, catalog.TargetLocale)
+	reportPath := translationFailureReportPath(workspace, catalog.TargetLocale)
 	cache.Entries = cacheEntriesInCatalogOrder(prepared, validByID)
 	if err := publishTranslationCache(cachePath, cache); err != nil {
 		return err
@@ -377,14 +359,14 @@ func loadCatalog(path string) (CatalogV1, error) {
 	return catalog, nil
 }
 
-func loadTranslationCacheV2(path, legacyPath, legacyModel, locale string) (TranslationCacheV2, error) {
+func loadTranslationCacheV2(path, locale string) (TranslationCacheV2, error) {
 	cache := TranslationCacheV2{Schema: translationSchema, TargetLocale: locale, PromptVersion: translationPromptV1, Entries: []TranslationCacheEntryV2{}}
 	data, err := readFileLimited(path, 320<<20)
 	recovered := false
 	if errors.Is(err, os.ErrNotExist) {
 		data, err = readFileLimited(path+".previous", 320<<20)
 		if errors.Is(err, os.ErrNotExist) {
-			return importLegacyTranslationCache(cache, legacyPath, legacyModel, locale)
+			return cache, nil
 		}
 		recovered = true
 	}
@@ -405,33 +387,6 @@ func loadTranslationCacheV2(path, legacyPath, legacyModel, locale string) (Trans
 			return TranslationCacheV2{}, fmt.Errorf("recover translation cache: %w", err)
 		}
 	}
-	return cache, nil
-}
-
-func importLegacyTranslationCache(cache TranslationCacheV2, path, model, locale string) (TranslationCacheV2, error) {
-	data, err := readFileLimited(path, 320<<20)
-	if errors.Is(err, os.ErrNotExist) {
-		return cache, nil
-	}
-	if err != nil {
-		return TranslationCacheV2{}, fmt.Errorf("read legacy translation cache: %w", err)
-	}
-	var legacy TranslationCacheV1
-	if err := decodeStrictJSON(data, &legacy); err != nil {
-		return TranslationCacheV2{}, fmt.Errorf("parse legacy translation cache safely: %w", err)
-	}
-	if legacy.Schema != "modpack-translator.translations/v1" || legacy.Provider != "ollama" || legacy.Model != model || legacy.TargetLocale != locale || legacy.PromptVersion == "" {
-		return TranslationCacheV2{}, errors.New("legacy translation cache metadata is invalid")
-	}
-	seen := map[string]bool{}
-	for i, entry := range legacy.Entries {
-		if entry.ID == "" || seen[entry.ID] || !isSHA256(entry.CacheKey) || !isSHA256(entry.SourceSHA256) || !isSHA256(entry.TokenSignature) || !isSHA256(entry.TranslationSHA256) || !utf8.ValidString(entry.Translation) || sha256Hex(entry.Translation) != entry.TranslationSHA256 {
-			return TranslationCacheV2{}, fmt.Errorf("legacy translation cache entry %d is invalid", i)
-		}
-		seen[entry.ID] = true
-		cache.Entries = append(cache.Entries, TranslationCacheEntryV2{ID: entry.ID, CacheKey: entry.CacheKey, SourceSHA256: entry.SourceSHA256, TokenSignature: entry.TokenSignature, Translation: entry.Translation, TranslationSHA256: entry.TranslationSHA256, Provider: "ollama", Model: model})
-	}
-	cache.PromptVersion = legacy.PromptVersion
 	return cache, nil
 }
 
@@ -476,7 +431,7 @@ func publishTranslationCache(path string, cache TranslationCacheV2) error {
 	return nil
 }
 
-func translationCachePath(workspace, model string, targetLocale ...string) string {
+func translationCachePath(workspace string, targetLocale ...string) string {
 	locale := selectedTargetLocale(targetLocale...)
 	name := "translations.v2.json"
 	if locale != defaultTargetLanguageCode {
@@ -485,17 +440,13 @@ func translationCachePath(workspace, model string, targetLocale ...string) strin
 	return filepath.Join(workspace, "translations", name)
 }
 
-func translationFailureReportPath(workspace, model string, targetLocale ...string) string {
+func translationFailureReportPath(workspace string, targetLocale ...string) string {
 	locale := selectedTargetLocale(targetLocale...)
 	name := "failures.v2.json"
 	if locale != defaultTargetLanguageCode {
 		name = "failures." + locale + ".v2.json"
 	}
 	return filepath.Join(workspace, "translations", name)
-}
-
-func legacyTranslationCachePath(workspace, model string) string {
-	return filepath.Join(workspace, "translations", "ollama", safeModelName(model), "translations.v1.json")
 }
 
 func publishTranslationFailureReport(path string, report translationFailureReport) error {

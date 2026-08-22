@@ -53,7 +53,7 @@ func TestRunTranslateExtractsCachesAndCreatesShareableZip(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace, export := outputPaths(modpack)
-	cache := readTranslationCache(t, translationCachePath(workspace, "fake:1"))
+	cache := readTranslationCache(t, translationCachePath(workspace))
 	if len(cache.Entries) != 1 || !strings.Contains(cache.Entries[0].Translation, "%s") {
 		t.Fatalf("cache = %#v", cache)
 	}
