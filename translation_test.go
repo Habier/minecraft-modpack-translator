@@ -85,7 +85,7 @@ func TestTranslateWorkspaceDeduplicatesBatchesCachesAndResumes(t *testing.T) {
 	}
 	provider.calls = nil
 	cache = readTranslationCache(t, translationCachePath(workspace))
-	cache.PromptVersion = "old-prompt"
+	cache.PromptVersion = "en-target-minecraft-v1"
 	data, _ := json.Marshal(cache)
 	if err := os.WriteFile(translationCachePath(workspace), data, 0644); err != nil {
 		t.Fatal(err)
@@ -95,6 +95,17 @@ func TestTranslateWorkspaceDeduplicatesBatchesCachesAndResumes(t *testing.T) {
 	}
 	if len(provider.calls) != 1 || len(provider.calls[0]) != 3 {
 		t.Fatalf("prompt invalidation calls = %#v", provider.calls)
+	}
+	cache = readTranslationCache(t, translationCachePath(workspace))
+	if cache.PromptVersion != translationPromptV2 {
+		t.Fatalf("prompt version = %q, want %q", cache.PromptVersion, translationPromptV2)
+	}
+	provider.calls = nil
+	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.calls) != 0 {
+		t.Fatalf("matching v2 cache was not reused: %#v", provider.calls)
 	}
 	otherModel := &fakeTranslator{}
 	if err := translateWorkspace(context.Background(), workspace, otherModel, translationOptions{}); err != nil {
@@ -301,6 +312,62 @@ func TestTranslateWorkspacePreservesPartialBatchesAndPreviousCache(t *testing.T)
 	}
 	if len(resume.calls) != 1 || resume.calls[0][0].ID == readTranslationCache(t, translationCachePath(workspace)).Entries[0].ID {
 		t.Fatalf("resume calls = %#v", resume.calls)
+	}
+}
+
+func TestTranslateWorkspaceDoesNotPublishStaleEntriesUnderNewPromptVersion(t *testing.T) {
+	workspace := t.TempDir()
+	writeTranslationCatalog(t, workspace, []CatalogEntryV1{
+		catalogTranslationEntry("a", "One", "a"),
+		catalogTranslationEntry("b", "Two", "b"),
+		catalogTranslationEntry("c", "Three", "c"),
+	})
+	if err := translateWorkspace(context.Background(), workspace, &fakeTranslator{}, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	cachePath := translationCachePath(workspace)
+	cache := readTranslationCache(t, cachePath)
+	cache.PromptVersion = "en-target-minecraft-v1"
+	data, err := json.Marshal(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachePath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	interrupted := &fakeTranslator{fn: func(call int, requests []TranslationRequest) ([]TranslationResult, error) {
+		if call == 2 {
+			return nil, errors.New("interrupted")
+		}
+		return validTranslationResults(requests), nil
+	}}
+	if err := translateWorkspace(context.Background(), workspace, interrupted, translationOptions{BatchSize: 1}); err == nil {
+		t.Fatal("interruption error = nil")
+	}
+	if len(interrupted.calls) != 2 {
+		t.Fatalf("interrupted calls = %#v", interrupted.calls)
+	}
+	completedID := interrupted.calls[0][0].ID
+	published := readTranslationCache(t, cachePath)
+	if published.PromptVersion != translationPromptV2 || len(published.Entries) != 1 || published.Entries[0].ID != completedID {
+		t.Fatalf("incrementally published cache = %#v", published)
+	}
+
+	retry := &fakeTranslator{}
+	if err := translateWorkspace(context.Background(), workspace, retry, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(retry.calls) != 1 || len(retry.calls[0]) != 2 {
+		t.Fatalf("retry calls = %#v", retry.calls)
+	}
+	requested := map[string]bool{}
+	for _, request := range retry.calls[0] {
+		requested[request.ID] = true
+	}
+	if requested[completedID] || len(requested) != 2 {
+		t.Fatalf("retry reused stale entries or missed v2 progress: completed=%q requested=%#v", completedID, requested)
 	}
 }
 

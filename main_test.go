@@ -32,12 +32,15 @@ func TestRunTranslateExtractsCachesAndCreatesShareableZip(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		start := strings.Index(body.Messages[0].Content, `[{"id":"`)
+		if len(body.Messages) != 2 {
+			t.Fatalf("request messages = %d, want 2", len(body.Messages))
+		}
+		start := strings.Index(body.Messages[1].Content, `[{"id":"`)
 		if start < 0 {
-			t.Fatalf("request prompt has no items: %s", body.Messages[0].Content)
+			t.Fatalf("request prompt has no items: %s", body.Messages[1].Content)
 		}
 		var items []TranslationRequest
-		if err := json.Unmarshal([]byte(body.Messages[0].Content[start:]), &items); err != nil {
+		if err := json.Unmarshal([]byte(body.Messages[1].Content[start:]), &items); err != nil {
 			t.Fatal(err)
 		}
 		content, _ := json.Marshal(map[string]any{"results": []TranslationResult{{ID: items[0].ID, Translated: "Hola " + strings.TrimPrefix(items[0].Source, "Hello ")}}})
@@ -92,12 +95,15 @@ func TestRunTranslateDoesNotCreateZipAfterPartialTranslation(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		start := strings.Index(body.Messages[0].Content, `[{"id":"`)
+		if len(body.Messages) != 2 {
+			t.Fatalf("request messages = %d, want 2", len(body.Messages))
+		}
+		start := strings.Index(body.Messages[1].Content, `[{"id":"`)
 		if start < 0 {
-			t.Fatalf("request prompt has no items: %s", body.Messages[0].Content)
+			t.Fatalf("request prompt has no items: %s", body.Messages[1].Content)
 		}
 		var items []TranslationRequest
-		if err := json.Unmarshal([]byte(body.Messages[0].Content[start:]), &items); err != nil {
+		if err := json.Unmarshal([]byte(body.Messages[1].Content[start:]), &items); err != nil {
 			t.Fatal(err)
 		}
 		results := []TranslationResult{}
