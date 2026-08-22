@@ -1,12 +1,41 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestCatalogCapacityIsIndependentFromObjectMemberLimit(t *testing.T) {
+	if maxCatalogCapacity <= maxCatalogMembers {
+		t.Fatalf("maxCatalogCapacity = %d, want greater than maxCatalogMembers = %d", maxCatalogCapacity, maxCatalogMembers)
+	}
+
+	for _, tt := range []struct {
+		name       string
+		entryCount int
+		capacity   int
+		wantError  string
+	}{
+		{name: "capacity beyond object membership accepted", entryCount: maxCatalogMembers, capacity: maxCatalogMembers + 1},
+		{name: "own boundary rejected", entryCount: 2, capacity: 2, wantError: "catalog entry count exceeds 2"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkCatalogCapacity(tt.entryCount, tt.capacity)
+			if tt.wantError == "" && err != nil {
+				t.Fatalf("checkCatalogCapacity() error = %v", err)
+			}
+			if tt.wantError != "" && (err == nil || err.Error() != tt.wantError) {
+				t.Fatalf("checkCatalogCapacity() error = %v, want %s", err, strconv.Quote(tt.wantError))
+			}
+		})
+	}
+}
 
 func TestCatalogExtractsConservativeFieldsAndTokens(t *testing.T) {
 	workspace := t.TempDir()
@@ -107,6 +136,26 @@ func TestCatalogExtractsKubeJSLangEntries(t *testing.T) {
 	}
 }
 
+func TestCatalogExtractsKubeJSLangWithLeadingBOM(t *testing.T) {
+	workspace := t.TempDir()
+	sourceFile := filepath.Join(workspace, "sources", "kubejs", "assets", "kubejs", "lang", "en_us.json")
+	data := append([]byte{0xef, 0xbb, 0xbf}, []byte(`{"quest.title":"Quest"}`)...)
+	writeFiles(t, "", map[string][]byte{sourceFile: data})
+
+	count, catalogPath, err := buildCatalog(workspace)
+	if err != nil {
+		t.Fatalf("buildCatalog() error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("KubeJS catalog count = %d, want 1", count)
+	}
+	entry := readCatalog(t, catalogPath).Entries[0]
+	wantSHA := sha256.Sum256(data)
+	if entry.Source != "Quest" || entry.Writeback.SourceSHA256 != hex.EncodeToString(wantSHA[:]) {
+		t.Fatalf("KubeJS BOM entry = %#v", entry)
+	}
+}
+
 func TestCatalogExtractsFTBChapterImageHoverLists(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -163,6 +212,37 @@ func TestCatalogExtractsFTBChapterImageHoverLists(t *testing.T) {
 	}
 }
 
+func TestCatalogExcludesStaleFTBLocalizationSourcesAndRejectsMalformedSelectedSource(t *testing.T) {
+	workspace := t.TempDir()
+	root := filepath.Join(workspace, "sources", "ftbquests", "config", "ftbquests", "quests")
+	malformed := []byte(`{title:"Skystrike"quest:{}}`)
+	writeFiles(t, "", map[string][]byte{
+		filepath.Join(root, "chapters", "chapter.snbt"):                    []byte(`{title:"Chapter",subtitle:[],images:[]}`),
+		filepath.Join(root, "quests", "quest.snbt"):                        []byte(`{title:"Quest",subtitle:"",description:[],tasks:[],rewards:[]}`),
+		filepath.Join(root, "lang", "id_id", "chapters", "malformed.snbt"): malformed,
+	})
+
+	count, catalogPath, err := buildCatalog(workspace)
+	if err != nil {
+		t.Fatalf("buildCatalog() with stale localization source error = %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("catalog count = %d, want 2", count)
+	}
+	for _, entry := range readCatalog(t, catalogPath).Entries {
+		if strings.Contains(entry.SourceFile, "/lang/id_id/") {
+			t.Fatalf("catalog contains localization source %#v", entry)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "chapters", "chapter.snbt"), malformed, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := buildCatalog(workspace); err == nil || !strings.Contains(err.Error(), "SNBT") {
+		t.Fatalf("buildCatalog() malformed selected source error = %v, want SNBT validation error", err)
+	}
+}
+
 func TestCatalogStableIDIgnoresSourceAndTracksFileHash(t *testing.T) {
 	workspace := t.TempDir()
 	file := filepath.Join(workspace, "assets", "example", "lang", pendingTranslationFileName())
@@ -202,9 +282,13 @@ func TestCatalogRejectsMalformedInputsAndPreservesPreviousCatalog(t *testing.T) 
 		data []byte
 	}{
 		{name: "duplicate", data: []byte(`{"key":"one","key":"two"}`)},
+		{name: "BOM with duplicate", data: append([]byte{0xef, 0xbb, 0xbf}, []byte(`{"key":"one","key":"two"}`)...)},
 		{name: "non string", data: []byte(`{"key":42}`)},
 		{name: "nested", data: []byte(`{"key":{"nested":"no"}}`)},
+		{name: "trailing data", data: []byte(`{"key":"value"} true`)},
 		{name: "invalid UTF-8", data: []byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'}},
+		{name: "non-leading BOM", data: append([]byte(" \n"), append([]byte{0xef, 0xbb, 0xbf}, []byte(`{"key":"value"}`)...)...)},
+		{name: "repeated BOM", data: append([]byte{0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf}, []byte(`{"key":"value"}`)...)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

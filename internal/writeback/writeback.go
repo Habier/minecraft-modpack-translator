@@ -30,6 +30,8 @@ const (
 
 var zipModTime = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
 
+var utf8BOM = []byte{0xef, 0xbb, 0xbf}
+
 func Workspace(modpackPath string) (string, error) {
 	paths := newWritebackPaths(modpackPath)
 	if err := RemoveStaleZip(modpackPath); err != nil {
@@ -295,6 +297,9 @@ func writeKubeJSLang(workspace, exportOverrides, targetLocale string, kubeJSLang
 		out, err := marshalOrderedStringObject(keys, values)
 		if err != nil {
 			return fmt.Errorf("marshaling KubeJS language file %s: %w", path, err)
+		}
+		if bytes.HasPrefix(data, utf8BOM) {
+			out = append(append([]byte(nil), utf8BOM...), out...)
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return fmt.Errorf("creating KubeJS language directory %s: %w", filepath.Dir(path), err)
@@ -1075,6 +1080,9 @@ func kubeJSNamespace(sourceFile string) string {
 }
 
 func orderedJSONKeys(data []byte) ([]string, error) {
+	if bytes.HasPrefix(data, utf8BOM) {
+		data = data[len(utf8BOM):]
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	token, err := decoder.Token()
 	if err != nil {

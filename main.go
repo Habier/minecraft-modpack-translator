@@ -460,20 +460,18 @@ func newLanguageAggregator(outputPath string) *languageAggregator {
 }
 
 type languageLimits struct {
-	files   uint64
-	bytes   uint64
-	members uint64
+	files uint64
+	bytes uint64
 }
 
 type languageBudget struct {
-	limits  languageLimits
-	files   uint64
-	bytes   uint64
-	members uint64
+	limits languageLimits
+	files  uint64
+	bytes  uint64
 }
 
 func defaultLanguageLimits() languageLimits {
-	return languageLimits{files: maxPendingSourceFiles, bytes: maxPendingSourceTotal, members: maxCatalogEntries}
+	return languageLimits{files: maxPendingSourceFiles, bytes: maxPendingSourceTotal}
 }
 
 func newLanguageAggregatorWithLimits(outputPath string, limits languageLimits, targetLocale ...string) *languageAggregator {
@@ -494,14 +492,6 @@ func (b *languageBudget) accountBytes(size uint64, jarPath, entryName string) er
 	}
 	b.files++
 	b.bytes += size
-	return nil
-}
-
-func (b *languageBudget) accountMembers(count uint64, jarPath, entryName string) error {
-	if count > b.limits.members-b.members {
-		return fmt.Errorf("language member limit %d exceeded at %s in %s", b.limits.members, entryName, filepath.Base(jarPath))
-	}
-	b.members += count
 	return nil
 }
 
@@ -554,16 +544,13 @@ func (a *languageAggregator) addJar(jarPath string) error {
 			return err
 		}
 		if language == targetLanguageFileName(a.targetLocale) {
-			keys, members, err := collectTargetLanguageKeys(data)
+			keys, err := collectTargetLanguageKeys(data)
 			if err != nil {
 				if !a.force {
 					return fmt.Errorf("parse %s in %s: %w", file.Name, filepath.Base(jarPath), err)
 				}
 				fmt.Printf("[WARN] %s/%s: ignoring malformed target %s: %v\n", filepath.Base(jarPath), namespace, file.Name, err)
 				continue
-			}
-			if err := a.budget.accountMembers(uint64(members), jarPath, file.Name); err != nil {
-				return err
 			}
 			files.targets = append(files.targets, keys)
 		} else {
@@ -574,9 +561,6 @@ func (a *languageAggregator) addJar(jarPath string) error {
 			if source.empty {
 				fmt.Printf("[SKIP] %s: empty %s\n", file.Name, sourceLanguageFileName())
 				continue
-			}
-			if err := a.budget.accountMembers(uint64(source.members), jarPath, file.Name); err != nil {
-				return err
 			}
 			files.sources = append(files.sources, source)
 		}
@@ -673,47 +657,47 @@ func parseStandardLanguage(data []byte) (parsedSourceLanguage, error) {
 	return result, nil
 }
 
-func collectTargetLanguageKeys(data []byte) (map[string]bool, int, error) {
+func collectTargetLanguageKeys(data []byte) (map[string]bool, error) {
 	if !utf8.Valid(data) {
-		return nil, 0, errors.New("file is not UTF-8")
+		return nil, errors.New("file is not UTF-8")
 	}
 	data = trimUTF8BOM(data)
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	token, err := decoder.Token()
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	if token != json.Delim('{') {
-		return nil, 0, errors.New("root must be an object")
+		return nil, errors.New("root must be an object")
 	}
 	keys := make(map[string]bool)
 	members := 0
 	for decoder.More() {
 		keyToken, err := decoder.Token()
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		key, ok := keyToken.(string)
 		if !ok {
-			return nil, 0, errors.New("object key must be a string")
+			return nil, errors.New("object key must be a string")
 		}
 		var raw json.RawMessage
 		if err := decoder.Decode(&raw); err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		keys[key] = true
 		members++
 		if members > maxCatalogMembers {
-			return nil, 0, fmt.Errorf("object exceeds %d members", maxCatalogMembers)
+			return nil, fmt.Errorf("object exceeds %d members", maxCatalogMembers)
 		}
 	}
 	if _, err := decoder.Token(); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	if err := ensureJSONEOF(decoder); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	return keys, members, nil
+	return keys, nil
 }
 
 func trimUTF8BOM(data []byte) []byte {

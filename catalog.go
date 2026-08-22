@@ -28,7 +28,7 @@ const (
 	catalogSchema       = "modpack-translator.catalog/v1"
 	maxCatalogDepth     = 64
 	maxCatalogMembers   = 100000
-	maxCatalogEntries   = 100000
+	maxCatalogCapacity  = 1000000
 	maxCatalogText      = 64 << 10
 	maxCatalogAggregate = 256 << 20
 )
@@ -340,8 +340,7 @@ func (b *catalogBuilder) extractTemplate(file string, object map[string]any, dat
 func (b *catalogBuilder) extractFTB() error {
 	root := filepath.Join(b.workspace, "sources", "ftbquests")
 	return walkSelected(root, func(relative string) bool {
-		ext := strings.ToLower(filepath.Ext(relative))
-		return ext == ".snbt" || ext == ".json5"
+		return isFTBQuestSourceFile(relative)
 	}, func(filePath, relative string, data []byte) error {
 		sourceFile := filepath.ToSlash(filepath.Join("sources", "ftbquests", relative))
 		switch strings.ToLower(filepath.Ext(relative)) {
@@ -624,8 +623,8 @@ func (b *catalogBuilder) add(kind, sourceFile, locator, source, format, valueTyp
 	if len(source) > maxCatalogText {
 		return fmt.Errorf("%s%s text is %d bytes; limit is %d", clean, locator, len(source), maxCatalogText)
 	}
-	if len(b.entries)+1 > maxCatalogEntries {
-		return fmt.Errorf("catalog entry count exceeds %d", maxCatalogEntries)
+	if err := checkCatalogCapacity(len(b.entries), maxCatalogCapacity); err != nil {
+		return err
 	}
 	b.aggregate += int64(len(source))
 	if b.aggregate > maxCatalogAggregate {
@@ -641,6 +640,13 @@ func (b *catalogBuilder) add(kind, sourceFile, locator, source, format, valueTyp
 		ID: stableCatalogID(kind, clean, locator, b.targetLocale), SourceKind: kind, SourceFile: clean, Locator: locator, Source: source, TargetLocale: b.targetLocale, Tokens: metadata,
 		Writeback: CatalogWritebackV1{Format: format, ValueType: valueType, Container: container, ArrayIndex: arrayIndex, SourceSHA256: hex.EncodeToString(digest[:]), Encoding: "UTF-8"},
 	})
+	return nil
+}
+
+func checkCatalogCapacity(entryCount, capacity int) error {
+	if entryCount >= capacity {
+		return fmt.Errorf("catalog entry count exceeds %d", capacity)
+	}
 	return nil
 }
 
@@ -671,7 +677,11 @@ func decodeJSONObjectUnique(data []byte, destination *map[string]json.RawMessage
 	if !utf8.Valid(data) {
 		return errors.New("file is not UTF-8")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	parserView := data
+	if bytes.HasPrefix(parserView, []byte{0xef, 0xbb, 0xbf}) {
+		parserView = parserView[3:]
+	}
+	decoder := json.NewDecoder(bytes.NewReader(parserView))
 	token, err := decoder.Token()
 	if err != nil {
 		return err

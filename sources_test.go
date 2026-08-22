@@ -165,12 +165,13 @@ func TestFTBQuestsExtraction(t *testing.T) {
 		{
 			name: "SNBT config",
 			files: map[string][]byte{
-				"config/ftbquests/quests/data.snbt":           []byte("data"),
-				"config/ftbquests/quests/chapters/start.snbt": []byte("chapter"),
-				"config/ftbquests/quests/settings.toml":       []byte("settings"),
-				"world/ftbquests/progress.snbt":               []byte("progress"),
-				"world/serverconfig/ftbquests-server.snbt":    []byte("server"),
-				"saves/save/ftbquests/progress.snbt":          []byte("save"),
+				"config/ftbquests/quests/data.snbt":                          []byte("data"),
+				"config/ftbquests/quests/chapters/start.snbt":                []byte("chapter"),
+				"config/ftbquests/quests/lang/id_id/chapters/malformed.snbt": []byte(`{title:"Skystrike"quest:{}}`),
+				"config/ftbquests/quests/settings.toml":                      []byte("settings"),
+				"world/ftbquests/progress.snbt":                              []byte("progress"),
+				"world/serverconfig/ftbquests-server.snbt":                   []byte("server"),
+				"saves/save/ftbquests/progress.snbt":                         []byte("save"),
 			},
 			wantRoot: "config/ftbquests/quests", wantFiles: []string{"data.snbt", "chapters/start.snbt"}, wantCount: 2,
 		},
@@ -181,7 +182,7 @@ func TestFTBQuestsExtraction(t *testing.T) {
 		},
 		{
 			name:     "defaultconfigs fallback",
-			files:    map[string][]byte{"defaultconfigs/ftbquests/quests/data.snbt": []byte("default"), "defaultconfigs/ftbquests/quests/reward_tables/a.snbt": []byte("reward")},
+			files:    map[string][]byte{"defaultconfigs/ftbquests/quests/data.snbt": []byte("default"), "defaultconfigs/ftbquests/quests/reward_tables/a.snbt": []byte("reward"), "defaultconfigs/ftbquests/quests/lang/id_id/chapters/malformed.snbt": []byte(`{title:"Skystrike"quest:{}}`)},
 			wantRoot: "defaultconfigs/ftbquests/quests", wantFiles: []string{"data.snbt", "reward_tables/a.snbt"}, wantCount: 2,
 		},
 		{
@@ -215,6 +216,9 @@ func TestFTBQuestsExtraction(t *testing.T) {
 			}
 			assertAbsent(t, filepath.Join(extractor.stageRoot, "ftbquests", "world"))
 			assertAbsent(t, filepath.Join(extractor.stageRoot, "ftbquests", "saves"))
+			if tt.wantRoot != "" {
+				assertAbsent(t, filepath.Join(extractor.stageRoot, "ftbquests", tt.wantRoot, "lang"))
+			}
 		})
 	}
 }

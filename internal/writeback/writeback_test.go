@@ -108,6 +108,72 @@ func TestWorkspaceWritesTranslatedOverridesAndDeterministicZip(t *testing.T) {
 	}
 }
 
+func TestWorkspaceWritesBOMPrefixedKubeJSLanguage(t *testing.T) {
+	modpack := t.TempDir()
+	workspace := filepath.Join(modpack, OutputDirectory, "workspace")
+	sourceFile := "sources/kubejs/assets/example/lang/en_us.json"
+	source := append(append([]byte(nil), utf8BOM...), []byte("{\n  \"second\": \"Second\",\n  \"first\": \"First\"\n}\n")...)
+	digest := sha256.Sum256(source)
+	sourceHash := hex.EncodeToString(digest[:])
+
+	writeTestFiles(t, map[string][]byte{
+		filepath.Join(workspace, filepath.FromSlash(sourceFile)): source,
+		filepath.Join(workspace, "catalog", "catalog.v1.json"): []byte(`{
+  "schema": "modpack-translator.catalog/v1",
+  "source_locale": "en_us",
+  "target_locale": "es_es",
+  "entries": [
+    {"id":"first","source_kind":"kubejs_lang","source_file":"` + sourceFile + `","locator":"/first","source":"First","target_locale":"es_es","tokens":[],"writeback":{"format":"json","value_type":"string","container":"object","source_file_sha256":"` + sourceHash + `","encoding":"UTF-8"}},
+    {"id":"second","source_kind":"kubejs_lang","source_file":"` + sourceFile + `","locator":"/second","source":"Second","target_locale":"es_es","tokens":[],"writeback":{"format":"json","value_type":"string","container":"object","source_file_sha256":"` + sourceHash + `","encoding":"UTF-8"}}
+  ]
+}`),
+		filepath.Join(workspace, "translations", "translations.v2.json"): []byte(`{
+  "schema": "modpack-translator.translations/v2",
+  "target_locale": "es_es",
+  "prompt_version": "test",
+  "entries": [
+    {"id":"first","translation":"Primero"},
+    {"id":"second","translation":"Segundo"}
+  ]
+}`),
+	})
+
+	if _, err := Workspace(modpack); err != nil {
+		t.Fatalf("writeback workspace: %v", err)
+	}
+
+	if got := readFile(t, filepath.Join(workspace, filepath.FromSlash(sourceFile))); !bytes.Equal(got, source) {
+		t.Fatal("writeback changed the original KubeJS source bytes used for hash identity")
+	}
+	if got := sha256.Sum256(readFile(t, filepath.Join(workspace, filepath.FromSlash(sourceFile)))); hex.EncodeToString(got[:]) != sourceHash {
+		t.Fatalf("source hash = %s, want original-byte hash %s", hex.EncodeToString(got[:]), sourceHash)
+	}
+
+	outPath := filepath.Join(modpack, OutputDirectory, "export", "overrides", "kubejs", "assets", "example", "lang", "es_es.json")
+	want := append(append([]byte(nil), utf8BOM...), []byte("{\n  \"second\": \"Segundo\",\n  \"first\": \"Primero\"\n}\n")...)
+	if got := readFile(t, outPath); !bytes.Equal(got, want) {
+		t.Fatalf("translated KubeJS output = %q, want %q", got, want)
+	}
+}
+
+func TestOrderedJSONKeysRejectsInvalidBOMPlacementAndMalformedJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "repeated leading BOM", data: append(append([]byte(nil), utf8BOM...), append(utf8BOM, []byte(`{"key":"value"}`)...)...)},
+		{name: "non-leading BOM", data: append([]byte(" \n"), append(utf8BOM, []byte(`{"key":"value"}`)...)...)},
+		{name: "malformed JSON", data: append(append([]byte(nil), utf8BOM...), []byte(`{"key":`)...)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := orderedJSONKeys(tt.data); err == nil {
+				t.Fatal("orderedJSONKeys() succeeded, want error")
+			}
+		})
+	}
+}
+
 func TestWorkspaceUsesCatalogTargetLocaleForOutputs(t *testing.T) {
 	modpack := t.TempDir()
 	workspace := filepath.Join(modpack, OutputDirectory, "workspace")

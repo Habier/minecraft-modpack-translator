@@ -230,8 +230,7 @@ func (e *sourceExtractor) extractFTBQuests(modpackPath string) error {
 		return nil
 	}
 	return e.walkRegularFiles(root, func(relative string) bool {
-		extension := strings.ToLower(filepath.Ext(relative))
-		return extension == ".snbt" || extension == ".json5"
+		return isFTBQuestSourceFile(relative)
 	}, func(relative string, data []byte) error {
 		if err := e.write(filepath.Join("ftbquests", relativeRoot, relative), data); err != nil {
 			return err
@@ -239,6 +238,23 @@ func (e *sourceExtractor) extractFTBQuests(modpackPath string) error {
 		e.counts.ftbquests++
 		return nil
 	})
+}
+
+func isFTBQuestSourceFile(relative string) bool {
+	extension := strings.ToLower(filepath.Ext(relative))
+	if extension != ".snbt" && extension != ".json5" {
+		return false
+	}
+	parts := strings.Split(filepath.ToSlash(relative), "/")
+	if len(parts) > 2 && parts[0] == "lang" {
+		return false
+	}
+	for i := 0; i+3 < len(parts); i++ {
+		if parts[i] == "quests" && parts[i+1] == "lang" {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *sourceExtractor) extractKubeJSLang(modpackPath string) error {

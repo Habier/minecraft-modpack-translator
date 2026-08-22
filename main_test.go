@@ -869,7 +869,7 @@ func TestCreateCentralKitchenDuplicateTargetFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys, _, err := collectTargetLanguageKeys(target)
+	keys, err := collectTargetLanguageKeys(target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -963,7 +963,7 @@ func TestLanguageAggregateLimits(t *testing.T) {
 	}{
 		{
 			name:   "exact file count accepted",
-			limits: languageLimits{files: 2, bytes: 1 << 20, members: maxCatalogEntries},
+			limits: languageLimits{files: 2, bytes: 1 << 20},
 			entries: []zipEntry{
 				{"assets/one/lang/en_us.json", entry},
 				{"assets/two/lang/en_us.json", entry},
@@ -971,7 +971,7 @@ func TestLanguageAggregateLimits(t *testing.T) {
 		},
 		{
 			name:   "one above file count rejected",
-			limits: languageLimits{files: 1, bytes: 1 << 20, members: maxCatalogEntries},
+			limits: languageLimits{files: 1, bytes: 1 << 20},
 			entries: []zipEntry{
 				{"assets/one/lang/en_us.json", entry},
 				{"assets/two/lang/en_us.json", entry},
@@ -980,7 +980,7 @@ func TestLanguageAggregateLimits(t *testing.T) {
 		},
 		{
 			name:   "exact combined source and target bytes accepted",
-			limits: languageLimits{files: 2, bytes: uint64(len(entry) * 2), members: maxCatalogEntries},
+			limits: languageLimits{files: 2, bytes: uint64(len(entry) * 2)},
 			entries: []zipEntry{
 				{"assets/example/lang/en_us.json", entry},
 				{"assets/example/lang/es_es.json", entry},
@@ -988,7 +988,7 @@ func TestLanguageAggregateLimits(t *testing.T) {
 		},
 		{
 			name:   "one above combined source and target bytes rejected",
-			limits: languageLimits{files: 2, bytes: uint64(len(entry)*2 - 1), members: maxCatalogEntries},
+			limits: languageLimits{files: 2, bytes: uint64(len(entry)*2 - 1)},
 			entries: []zipEntry{
 				{"assets/example/lang/en_us.json", entry},
 				{"assets/example/lang/es_es.json", entry},
@@ -997,7 +997,7 @@ func TestLanguageAggregateLimits(t *testing.T) {
 		},
 		{
 			name:   "duplicate target entries still count",
-			limits: languageLimits{files: 1, bytes: 1 << 20, members: maxCatalogEntries},
+			limits: languageLimits{files: 1, bytes: 1 << 20},
 			entries: []zipEntry{
 				{"assets/example/lang/es_es.json", entry},
 				{"assets/example/lang/es_es.json", entry},
@@ -1006,41 +1006,12 @@ func TestLanguageAggregateLimits(t *testing.T) {
 		},
 		{
 			name:   "target-suppressed source still counts",
-			limits: languageLimits{files: 2, bytes: uint64(len(entry)*2 - 1), members: maxCatalogEntries},
+			limits: languageLimits{files: 2, bytes: uint64(len(entry)*2 - 1)},
 			entries: []zipEntry{
 				{"assets/example/lang/es_es.json", entry},
 				{"assets/example/lang/en_us.json", entry},
 			},
 			want: "language byte limit " + strconv.Itoa(len(entry)*2-1) + " exceeded at assets/example/lang/en_us.json in aggregate.jar",
-		},
-		{
-			name:    "exact combined member boundary accepted",
-			limits:  languageLimits{files: 2, bytes: 1 << 20, members: 2},
-			entries: []zipEntry{{"assets/example/lang/es_es.json", entry}, {"assets/example/lang/en_us.json", entry}},
-		},
-		{
-			name:    "suppressed source one over member limit rejected",
-			limits:  languageLimits{files: 2, bytes: 1 << 20, members: 1},
-			entries: []zipEntry{{"assets/example/lang/es_es.json", entry}, {"assets/example/lang/en_us.json", entry}},
-			want:    "language member limit 1 exceeded at assets/example/lang/en_us.json in aggregate.jar",
-		},
-		{
-			name:    "duplicate target members count separately",
-			limits:  languageLimits{files: 1, bytes: 1 << 20, members: 1},
-			entries: []zipEntry{{"assets/example/lang/es_es.json", []byte(`{"key":"one","key":"two"}`)}},
-			want:    "language member limit 1 exceeded at assets/example/lang/es_es.json in aggregate.jar",
-		},
-		{
-			name:    "overwritten source members count separately",
-			limits:  languageLimits{files: 2, bytes: 1 << 20, members: 1},
-			entries: []zipEntry{{"assets/example/lang/en_us.json", entry}, {"assets/example/lang/en_us.json", entry}},
-			want:    "language member limit 1 exceeded at assets/example/lang/en_us.json in aggregate.jar",
-		},
-		{
-			name:    "duplicate source members count separately",
-			limits:  languageLimits{files: 1, bytes: 1 << 20, members: 1},
-			entries: []zipEntry{{"assets/example/lang/en_us.json", []byte(`{"key":"one","key":"two"}`)}},
-			want:    "language member limit 1 exceeded at assets/example/lang/en_us.json in aggregate.jar",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1058,25 +1029,48 @@ func TestLanguageAggregateLimits(t *testing.T) {
 	}
 }
 
-func TestRunLanguageAggregateLimitPreservesWorkspace(t *testing.T) {
-	modpack, jar := testModpack(t)
-	writeTestJar(t, jar, []zipEntry{{"assets/previous/lang/en_us.json", []byte(`{"old":"complete"}`)}})
-	if err := run([]string{modpack}); err != nil {
-		t.Fatal(err)
-	}
-	workspace, _ := outputPaths(modpack)
-	before := workspaceSnapshot(t, workspace)
-
+func TestLanguageMemberLimitIsPerFile(t *testing.T) {
+	root := t.TempDir()
+	jar := filepath.Join(root, "members.jar")
+	data := languageObject(maxCatalogMembers)
 	writeTestJar(t, jar, []zipEntry{
-		{"assets/example/lang/en_us.json", []byte(`{"one":"value"}`)},
-		{"assets/example/lang/es_es.json", []byte(`{"one":"valor"}`)},
+		{"assets/example/lang/en_us.json", data},
+		{"assets/example/lang/es_es.json", data},
 	})
-	err := runWithLanguageLimits([]string{modpack}, languageLimits{files: 2, bytes: 1 << 20, members: 1})
-	if err == nil || !strings.Contains(err.Error(), "language member limit 1 exceeded at assets/example/lang/es_es.json in mod.jar") {
-		t.Fatalf("runWithLanguageLimits() error = %v, want aggregate limit with JAR/entry context", err)
+	if err := newLanguageAggregator(filepath.Join(root, "output")).addJar(jar); err != nil {
+		t.Fatalf("addJar() error = %v; each language file is within its member limit", err)
 	}
-	if got := workspaceSnapshot(t, workspace); got != before {
-		t.Fatal("aggregate limit failure changed live workspace")
+}
+
+func languageObject(members int) []byte {
+	var data strings.Builder
+	data.WriteByte('{')
+	for i := 0; i < members; i++ {
+		if i > 0 {
+			data.WriteByte(',')
+		}
+		data.WriteString(strconv.Quote(strconv.Itoa(i)))
+		data.WriteString(`:"value"`)
+	}
+	data.WriteByte('}')
+	return []byte(data.String())
+}
+
+func TestLanguageMemberLimitRejectsOversizedFile(t *testing.T) {
+	data := languageObject(maxCatalogMembers + 1)
+	for _, tt := range []struct {
+		name  string
+		parse func([]byte) error
+	}{
+		{name: "source", parse: func(data []byte) error { _, err := parseStandardLanguage(data); return err }},
+		{name: "target", parse: func(data []byte) error { _, err := collectTargetLanguageKeys(data); return err }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.parse(data)
+			if err == nil || !strings.Contains(err.Error(), "object exceeds "+strconv.Itoa(maxCatalogMembers)+" members") {
+				t.Fatalf("parse() error = %v, want per-file member limit", err)
+			}
+		})
 	}
 }
 
