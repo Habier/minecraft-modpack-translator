@@ -21,6 +21,15 @@ const (
 	maxCloudResponseBody = 4 << 20
 	// Bound provider-directed waits so retries and fallback remain responsive.
 	maxServerRetryDelay = 5 * time.Second
+
+	defaultContextTokens   = 8192
+	defaultMaxOutputTokens = 2048
+	defaultMaxRequestBytes = 98304
+	defaultMaxEntries      = 20
+	maxContextTokens       = 1048576
+	maxOutputTokens        = 262144
+	maxRequestBytes        = 4 << 20
+	maxEntries             = 10000
 )
 
 type capabilityMode string
@@ -37,6 +46,7 @@ type providerProfile struct {
 	ArrayLength      bool
 	RequireParams    bool
 	Timeout          time.Duration
+	Limits           Limits
 }
 
 func providerProfilesFromEnv(getenv func(string) string) ([]providerProfile, error) {
@@ -98,7 +108,57 @@ func providerProfileFromEnv(entry providerChainEntry, getenv func(string) string
 			}
 		}
 	}
-	return providerProfile{Name: entry.name, Key: key, Model: model, BaseURL: parsed, Mode: mode, ArrayLength: entry.capabilities.arrayLength, RequireParams: entry.capabilities.requireParams, Timeout: timeout}, nil
+	limits, err := providerLimitsFromEnv(prefix, getenv)
+	if err != nil {
+		return providerProfile{}, err
+	}
+	return providerProfile{Name: entry.name, Key: key, Model: model, BaseURL: parsed, Mode: mode, ArrayLength: entry.capabilities.arrayLength, RequireParams: entry.capabilities.requireParams, Timeout: timeout, Limits: limits}, nil
+}
+
+func providerLimitsFromEnv(prefix string, getenv func(string) string) (Limits, error) {
+	contextEnv := prefix + "CONTEXT_TOKENS"
+	outputEnv := prefix + "MAX_OUTPUT_TOKENS"
+	requestEnv := prefix + "MAX_REQUEST_BYTES"
+	entriesEnv := prefix + "MAX_ENTRIES"
+
+	contextTokens, err := parseProviderLimit(getenv(contextEnv), contextEnv, defaultContextTokens, 1024, maxContextTokens)
+	if err != nil {
+		return Limits{}, err
+	}
+	maxOutputTokens, err := parseProviderLimit(getenv(outputEnv), outputEnv, defaultMaxOutputTokens, 1, maxOutputTokens)
+	if err != nil {
+		return Limits{}, err
+	}
+	maxRequestBytes, err := parseProviderLimit(getenv(requestEnv), requestEnv, defaultMaxRequestBytes, 1, maxRequestBytes)
+	if err != nil {
+		return Limits{}, err
+	}
+	maxEntriesValue, err := parseProviderLimit(getenv(entriesEnv), entriesEnv, defaultMaxEntries, 1, maxEntries)
+	if err != nil {
+		return Limits{}, err
+	}
+	if maxOutputTokens >= contextTokens {
+		return Limits{}, fmt.Errorf("%s must be less than %s", outputEnv, contextEnv)
+	}
+	return Limits{ContextTokens: contextTokens, MaxOutputTokens: maxOutputTokens, MaxRequestBytes: maxRequestBytes, MaxEntries: maxEntriesValue}, nil
+}
+
+func parseProviderLimit(raw, envName string, defaultValue, minimum, maximum int) (int, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return defaultValue, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", envName)
+	}
+	if parsed < minimum {
+		return 0, fmt.Errorf("%s must be at least %d", envName, minimum)
+	}
+	if parsed > maximum {
+		return 0, fmt.Errorf("%s must not exceed %d", envName, maximum)
+	}
+	return parsed, nil
 }
 
 func providerEnvNames(prefix string) (baseEnv, keyEnv, modelEnv, modeEnv string) {
@@ -587,7 +647,12 @@ func providerChainSummary(getenv func(string) string) string {
 		case entry.capabilities.timeoutRequired && timeout == "":
 			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)%s", entry.name, timeoutEnv, suffix))
 		default:
-			lines = append(lines, fmt.Sprintf("  %s: enabled model=%s mode=%s%s", entry.name, model, mode, suffix))
+			limits, err := providerLimitsFromEnv(prefix, getenv)
+			if err != nil {
+				lines = append(lines, fmt.Sprintf("  %s: invalid (%s)%s", entry.name, err, suffix))
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("  %s: enabled model=%s mode=%s limits=context_tokens:%d,max_output_tokens:%d,max_request_bytes:%d,max_entries:%d%s", entry.name, model, mode, limits.ContextTokens, limits.MaxOutputTokens, limits.MaxRequestBytes, limits.MaxEntries, suffix))
 		}
 	}
 	return strings.Join(lines, "\n")

@@ -24,6 +24,14 @@ type Identity struct {
 	Model    string `json:"model"`
 }
 
+// Limits describes a provider model's configured translation capacity.
+type Limits struct {
+	ContextTokens   int
+	MaxOutputTokens int
+	MaxRequestBytes int
+	MaxEntries      int
+}
+
 type Batch struct {
 	Results  []Result
 	Identity Identity

@@ -53,6 +53,91 @@ func TestProviderProfilesFromEnvCustomProviderParsing(t *testing.T) {
 	}
 }
 
+func TestProviderLimitsFromEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want Limits
+	}{
+		{
+			name: "defaults",
+			want: Limits{ContextTokens: 8192, MaxOutputTokens: 2048, MaxRequestBytes: 98304, MaxEntries: 20},
+		},
+		{
+			name: "explicit values",
+			env: map[string]string{
+				"PROVIDER_TEST_CONTEXT_TOKENS":    "32768",
+				"PROVIDER_TEST_MAX_OUTPUT_TOKENS": "4096",
+				"PROVIDER_TEST_MAX_REQUEST_BYTES": "196608",
+				"PROVIDER_TEST_MAX_ENTRIES":       "80",
+			},
+			want: Limits{ContextTokens: 32768, MaxOutputTokens: 4096, MaxRequestBytes: 196608, MaxEntries: 80},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			limits, err := providerLimitsFromEnv("PROVIDER_TEST_", func(name string) string { return tt.env[name] })
+			if err != nil || limits != tt.want {
+				t.Fatalf("limits=%#v want=%#v error=%v", limits, tt.want, err)
+			}
+		})
+	}
+}
+
+func TestProviderLimitsRejectInvalidValues(t *testing.T) {
+	tests := []struct {
+		name, envName, value, want string
+	}{
+		{"malformed", "PROVIDER_TEST_MAX_ENTRIES", "many", "PROVIDER_TEST_MAX_ENTRIES must be an integer"},
+		{"zero", "PROVIDER_TEST_MAX_REQUEST_BYTES", "0", "PROVIDER_TEST_MAX_REQUEST_BYTES must be at least 1"},
+		{"negative", "PROVIDER_TEST_MAX_OUTPUT_TOKENS", "-1", "PROVIDER_TEST_MAX_OUTPUT_TOKENS must be at least 1"},
+		{"context below minimum", "PROVIDER_TEST_CONTEXT_TOKENS", "1023", "PROVIDER_TEST_CONTEXT_TOKENS must be at least 1024"},
+		{"context ceiling", "PROVIDER_TEST_CONTEXT_TOKENS", "1048577", "PROVIDER_TEST_CONTEXT_TOKENS must not exceed 1048576"},
+		{"output ceiling", "PROVIDER_TEST_MAX_OUTPUT_TOKENS", "262145", "PROVIDER_TEST_MAX_OUTPUT_TOKENS must not exceed 262144"},
+		{"request ceiling", "PROVIDER_TEST_MAX_REQUEST_BYTES", "4194305", "PROVIDER_TEST_MAX_REQUEST_BYTES must not exceed 4194304"},
+		{"entries ceiling", "PROVIDER_TEST_MAX_ENTRIES", "10001", "PROVIDER_TEST_MAX_ENTRIES must not exceed 10000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := map[string]string{tt.envName: tt.value}
+			_, err := providerLimitsFromEnv("PROVIDER_TEST_", func(name string) string { return env[name] })
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("error=%v want=%q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestProviderLimitsRequireOutputBelowContext(t *testing.T) {
+	for _, output := range []string{"4096", "4097"} {
+		t.Run(output, func(t *testing.T) {
+			env := map[string]string{"PROVIDER_TEST_CONTEXT_TOKENS": "4096", "PROVIDER_TEST_MAX_OUTPUT_TOKENS": output}
+			_, err := providerLimitsFromEnv("PROVIDER_TEST_", func(name string) string { return env[name] })
+			want := "PROVIDER_TEST_MAX_OUTPUT_TOKENS must be less than PROVIDER_TEST_CONTEXT_TOKENS"
+			if err == nil || err.Error() != want {
+				t.Fatalf("error=%v want=%q", err, want)
+			}
+		})
+	}
+}
+
+func TestProviderLimitsUseNormalizedProviderName(t *testing.T) {
+	env := providerChainEnv("together-ai")
+	env["PROVIDER_TOGETHER_AI_BASE_URL"] = "https://api.together.xyz/v1"
+	env["PROVIDER_TOGETHER_AI_API_KEY"] = "normalized-secret"
+	env["PROVIDER_TOGETHER_AI_MODEL"] = "normalized-model"
+	env["PROVIDER_TOGETHER_AI_MODE"] = "json_object"
+	env["PROVIDER_TOGETHER_AI_CONTEXT_TOKENS"] = "16384"
+	env["PROVIDER_TOGETHER_AI_MAX_OUTPUT_TOKENS"] = "3072"
+	env["PROVIDER_TOGETHER_AI_MAX_REQUEST_BYTES"] = "120000"
+	env["PROVIDER_TOGETHER_AI_MAX_ENTRIES"] = "30"
+	profiles, err := providerProfilesFromEnv(func(name string) string { return env[name] })
+	want := Limits{ContextTokens: 16384, MaxOutputTokens: 3072, MaxRequestBytes: 120000, MaxEntries: 30}
+	if err != nil || len(profiles) != 1 || profiles[0].Limits != want {
+		t.Fatalf("profiles=%#v error=%v", profiles, err)
+	}
+}
+
 func TestBuildTranslatorChainPreservesConfiguredOrder(t *testing.T) {
 	env := providerChainEnv("together,deepinfra,ollama")
 	translator, model, err := buildTranslatorChain(func(name string) string { return env[name] })
@@ -146,7 +231,7 @@ func TestProviderChainSummaryIsOrderedAndSecretFree(t *testing.T) {
 	want := []string{
 		"deepinfra: enabled model=deep-model mode=json_schema",
 		"together: disabled (PROVIDER_TOGETHER_MODEL not set)",
-		"ollama: enabled model=local-model mode=json_schema (final fallback)",
+		"ollama: enabled model=local-model mode=json_schema limits=context_tokens:8192,max_output_tokens:2048,max_request_bytes:98304,max_entries:20 (final fallback)",
 	}
 	position := -1
 	for _, text := range want {
@@ -160,6 +245,27 @@ func TestProviderChainSummaryIsOrderedAndSecretFree(t *testing.T) {
 		if strings.Contains(summary, secret) {
 			t.Fatalf("summary leaked secret: %q", summary)
 		}
+	}
+}
+
+func TestProviderChainSummaryReportsLimitsAndSafeErrors(t *testing.T) {
+	env := providerChainEnv("deepinfra")
+	env["PROVIDER_DEEPINFRA_CONTEXT_TOKENS"] = "32768"
+	env["PROVIDER_DEEPINFRA_MAX_OUTPUT_TOKENS"] = "secret-invalid-value"
+	summary := providerChainSummary(func(name string) string { return env[name] })
+	if !strings.Contains(summary, "deepinfra: invalid (PROVIDER_DEEPINFRA_MAX_OUTPUT_TOKENS must be an integer)") {
+		t.Fatalf("summary=%q", summary)
+	}
+	for _, secret := range []string{"deep-secret", "secret-invalid-value"} {
+		if strings.Contains(summary, secret) {
+			t.Fatalf("summary leaked secret or raw invalid value: %q", summary)
+		}
+	}
+
+	env["PROVIDER_DEEPINFRA_MAX_OUTPUT_TOKENS"] = "4096"
+	summary = providerChainSummary(func(name string) string { return env[name] })
+	if !strings.Contains(summary, "limits=context_tokens:32768,max_output_tokens:4096,max_request_bytes:98304,max_entries:20") {
+		t.Fatalf("summary=%q", summary)
 	}
 }
 
