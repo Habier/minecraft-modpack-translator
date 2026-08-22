@@ -14,8 +14,6 @@ import (
 
 const outputDirectory = writeback.OutputDirectory
 
-const zipName = writeback.ZipName
-
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: go run ./tools/writeback <modpack-path>\n")

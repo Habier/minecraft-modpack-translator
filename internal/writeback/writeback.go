@@ -25,7 +25,6 @@ const (
 	ResourcePackName = "ModpackTranslations"
 	SourceLang       = "en_us"
 	TargetLang       = "es_es"
-	ZipName          = "modpack-translations-es_es.zip"
 )
 
 var zipModTime = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)

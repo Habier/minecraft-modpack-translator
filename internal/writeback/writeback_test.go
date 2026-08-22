@@ -16,6 +16,49 @@ import (
 	"testing"
 )
 
+func TestZipNameFor(t *testing.T) {
+	tests := []struct {
+		name         string
+		targetLocale string
+		want         string
+	}{
+		{name: "Spanish locale", targetLocale: "es_es", want: "modpack-translations-es_es.zip"},
+		{name: "German locale", targetLocale: "de_de", want: "modpack-translations-de_de.zip"},
+		{name: "empty locale uses default", want: "modpack-translations-es_es.zip"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ZipNameFor(tt.targetLocale); got != tt.want {
+				t.Fatalf("ZipNameFor(%q) = %q, want %q", tt.targetLocale, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestZipPath(t *testing.T) {
+	modpack := filepath.Join("testdata", "modpack")
+	tests := []struct {
+		name         string
+		targetLocale []string
+		wantName     string
+	}{
+		{name: "Spanish locale", targetLocale: []string{"es_es"}, wantName: "modpack-translations-es_es.zip"},
+		{name: "German locale", targetLocale: []string{"de_de"}, wantName: "modpack-translations-de_de.zip"},
+		{name: "omitted locale uses default", wantName: "modpack-translations-es_es.zip"},
+		{name: "empty locale uses default", targetLocale: []string{""}, wantName: "modpack-translations-es_es.zip"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := filepath.Join(modpack, OutputDirectory, "export", tt.wantName)
+			if got := ZipPath(modpack, tt.targetLocale...); got != want {
+				t.Fatalf("ZipPath(%q, %q) = %q, want %q", modpack, tt.targetLocale, got, want)
+			}
+		})
+	}
+}
+
 func TestWorkspaceWritesTranslatedOverridesAndDeterministicZip(t *testing.T) {
 	modpack := t.TempDir()
 	workspace := filepath.Join(modpack, OutputDirectory, "workspace")

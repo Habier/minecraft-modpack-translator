@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"modpack-translator/internal/writeback"
 )
 
 func TestWritebackCreatesShareableZipWithKubeJSAndResourcePack(t *testing.T) {
@@ -52,7 +54,7 @@ func TestWritebackCreatesShareableZipWithKubeJSAndResourcePack(t *testing.T) {
 		t.Fatalf("KubeJS export = %q, want %q", got, want)
 	}
 
-	zipPath := filepath.Join(modpack, outputDirectory, "export", zipName)
+	zipPath := writeback.ZipPath(modpack)
 	entries := zipEntries(t, zipPath)
 	for _, want := range []string{
 		"kubejs/assets/ftbquestlocalizer/lang/es_es.json",
@@ -70,7 +72,7 @@ func TestWritebackCreatesShareableZipWithKubeJSAndResourcePack(t *testing.T) {
 func TestWritebackDoesNotCreateZipWhenTranslationMissing(t *testing.T) {
 	modpack := t.TempDir()
 	workspace := filepath.Join(modpack, outputDirectory, "workspace")
-	zipPath := filepath.Join(modpack, outputDirectory, "export", zipName)
+	zipPath := writeback.ZipPath(modpack)
 	writeTestFiles(t, map[string][]byte{
 		filepath.Join(workspace, "catalog", "catalog.v1.json"): []byte(`{
   "schema": "modpack-translator.catalog/v1",
@@ -143,7 +145,7 @@ func TestWritebackDoesNotCreateZipWhenKubeJSSourceInvalid(t *testing.T) {
     {"id":"first","cache_key":"","source_sha256":"","token_signature":"","translation":"Primero","translation_sha256":"","provider":"test","model":"test"}
   ]
 }`),
-				filepath.Join(modpack, outputDirectory, "export", zipName): []byte("stale zip"),
+				writeback.ZipPath(modpack): []byte("stale zip"),
 			}
 			if tt.sourceData != nil {
 				files[sourcePath] = tt.sourceData
@@ -157,7 +159,7 @@ func TestWritebackDoesNotCreateZipWhenKubeJSSourceInvalid(t *testing.T) {
 			if !strings.Contains(err.Error(), tt.wantMessage) {
 				t.Fatalf("error = %q, want %q", err, tt.wantMessage)
 			}
-			zipPath := filepath.Join(modpack, outputDirectory, "export", zipName)
+			zipPath := writeback.ZipPath(modpack)
 			if _, statErr := os.Stat(zipPath); !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatalf("ZIP stat error = %v, want not exist", statErr)
 			}
