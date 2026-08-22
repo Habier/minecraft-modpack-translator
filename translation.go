@@ -24,8 +24,6 @@ import (
 const (
 	translationSchema   = "modpack-translator.translations/v2"
 	translationPromptV2 = "minecraft-localization-system-user-v2"
-	defaultBatchSize    = 20
-	defaultBatchBytes   = 96 << 10
 	validationRetries   = 1
 	maxCatalogFileBytes = 320 << 20
 )
@@ -48,10 +46,7 @@ type TranslationCacheEntryV2 struct {
 	Model             string `json:"model"`
 }
 
-type translationOptions struct {
-	BatchSize  int
-	BatchBytes int
-}
+type translationOptions struct{}
 
 type TranslationPartialError struct {
 	Successful int
@@ -103,12 +98,7 @@ type preparedTranslation struct {
 }
 
 func translateWorkspace(ctx context.Context, workspace string, translator Translator, options translationOptions) error {
-	if options.BatchSize <= 0 {
-		options.BatchSize = defaultBatchSize
-	}
-	if options.BatchBytes <= 0 {
-		options.BatchBytes = defaultBatchBytes
-	}
+	_ = options
 	catalog, err := loadCatalog(filepath.Join(workspace, "catalog", "catalog.v1.json"))
 	if err != nil {
 		return err
@@ -142,7 +132,7 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 	}
 	cachedCount := 0
 	groups := make(map[string][]preparedTranslation)
-	var keys []string
+	var representatives []preparedTranslation
 	for _, item := range prepared {
 		if cached, ok := validByID[item.entry.ID]; ok && promptMatches && cached.SourceSHA256 == item.sourceHash && cached.TokenSignature == item.tokenSignature && cached.TranslationSHA256 == sha256Hex(cached.Translation) {
 			cached.CacheKey = sha256Hex(item.key)
@@ -151,11 +141,19 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 			continue
 		}
 		if _, exists := groups[item.key]; !exists {
-			keys = append(keys, item.key)
+			representatives = append(representatives, item)
 		}
 		groups[item.key] = append(groups[item.key], item)
 	}
-	sort.Strings(keys)
+	sort.SliceStable(representatives, func(i, j int) bool {
+		leftMod, rightMod := catalogModIdentity(representatives[i].entry), catalogModIdentity(representatives[j].entry)
+		if leftMod != rightMod {
+			return leftMod < rightMod
+		}
+		leftFile := filepath.ToSlash(filepath.Clean(representatives[i].entry.SourceFile))
+		rightFile := filepath.ToSlash(filepath.Clean(representatives[j].entry.SourceFile))
+		return leftFile < rightFile
+	})
 	fmt.Printf("Translation progress: total=%d cached=%d translated=0 remaining=%d\n", len(prepared), cachedCount, len(prepared)-cachedCount)
 	appendTranslationLog("start total=%d cached=%d remaining=%d", len(prepared), cachedCount, len(prepared)-cachedCount)
 	if len(prepared) == 0 {
@@ -235,34 +233,27 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 		}
 		return nil
 	}
-	for batchNumber, start := 1, 0; start < len(keys); batchNumber++ {
-		end, size := start, 0
-		for end < len(keys) && end-start < options.BatchSize {
-			representative := groups[keys[end]][0]
-			itemSize := len(representative.protected.Protected) + len(representative.entry.ID) + len(representative.entry.SourceKind) + len(representative.entry.SourceFile) + 256
-			if end > start && size+itemSize > options.BatchBytes {
-				break
-			}
-			if itemSize > options.BatchBytes {
-				return fmt.Errorf("catalog entry %s exceeds translation batch byte limit %d", representative.entry.ID, options.BatchBytes)
-			}
-			size += itemSize
-			end++
+	orderedRequests := make([]TranslationRequest, 0, len(representatives))
+	orderedByID := make(map[string]preparedTranslation, len(representatives))
+	for _, item := range representatives {
+		request := TranslationRequest{ID: item.entry.ID, Source: item.protected.Protected, SourceKind: item.entry.SourceKind, SourceFile: filepath.ToSlash(item.entry.SourceFile), TargetLocale: catalog.TargetLocale}
+		orderedRequests = append(orderedRequests, request)
+		orderedByID[request.ID] = item
+	}
+	plans, err := translator.Plan(orderedRequests)
+	if err != nil {
+		return fmt.Errorf("plan translation batches: %w", err)
+	}
+	for batchNumber, requests := range plans {
+		byID := make(map[string]preparedTranslation, len(requests))
+		for _, request := range requests {
+			byID[request.ID] = orderedByID[request.ID]
 		}
-		requests := make([]TranslationRequest, 0, end-start)
-		byID := make(map[string]preparedTranslation, end-start)
-		for _, key := range keys[start:end] {
-			item := groups[key][0]
-			request := TranslationRequest{ID: item.entry.ID, Source: item.protected.Protected, SourceKind: item.entry.SourceKind, SourceFile: filepath.ToSlash(item.entry.SourceFile), TargetLocale: catalog.TargetLocale}
-			requests = append(requests, request)
-			byID[request.ID] = item
-		}
-		fmt.Printf("Translation batch %d: entries=%d bytes=%d remaining=%d\n", batchNumber, len(requests), size, len(prepared)-cachedCount-translatedCount)
-		appendTranslationLog("batch %d entries=%d bytes=%d remaining=%d", batchNumber, len(requests), size, len(prepared)-cachedCount-translatedCount)
+		fmt.Printf("Translation batch %d: entries=%d remaining=%d\n", batchNumber+1, len(requests), len(prepared)-cachedCount-translatedCount)
+		appendTranslationLog("batch %d entries=%d remaining=%d", batchNumber+1, len(requests), len(prepared)-cachedCount-translatedCount)
 		if err := processBatch(requests, byID); err != nil {
-			return fmt.Errorf("translate batch %d: %w", batchNumber, err)
+			return fmt.Errorf("translate batch %d: %w", batchNumber+1, err)
 		}
-		start = end
 		appendTranslationLog("progress total=%d cached=%d translated=%d remaining=%d", len(prepared), cachedCount, translatedCount, len(prepared)-cachedCount-translatedCount)
 		fmt.Printf("Translation progress: total=%d cached=%d translated=%d remaining=%d\n", len(prepared), cachedCount, translatedCount, len(prepared)-cachedCount-translatedCount)
 	}
@@ -293,6 +284,22 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 	appendTranslationLog("done successful=%d cached=%d failed=0", translatedCount, cachedCount)
 	fmt.Printf("Translation summary: successful=%d cached=%d failed=0\n", translatedCount, cachedCount)
 	return nil
+}
+
+func catalogModIdentity(entry CatalogEntryV1) string {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(entry.SourceFile)), "/")
+	switch {
+	case len(parts) >= 2 && parts[0] == "assets":
+		return "namespace:" + parts[1]
+	case len(parts) >= 4 && parts[0] == "sources" && parts[1] == "kubejs" && parts[2] == "assets":
+		return "namespace:" + parts[3]
+	case len(parts) >= 4 && parts[0] == "sources" && parts[1] == "patchouli" && (parts[2] == "jars" || parts[2] == "instance"):
+		return "patchouli:" + parts[3]
+	case len(parts) >= 2 && parts[0] == "sources" && parts[1] == "ftbquests":
+		return "ftbquests"
+	default:
+		return entry.SourceKind
+	}
 }
 
 func validateTranslationResults(results []TranslationResult, requested map[string]preparedTranslation) (map[string]string, error) {

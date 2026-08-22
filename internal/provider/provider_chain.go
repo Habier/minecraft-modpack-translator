@@ -273,11 +273,28 @@ type openAITranslator struct {
 }
 
 func newOpenAITranslator(profile providerProfile) *openAITranslator {
+	profile.Limits = limitsWithDefaults(profile.Limits)
 	timeout := profile.Timeout
 	if timeout == 0 {
 		timeout = 2 * time.Minute
 	}
 	return &openAITranslator{profile: profile, client: &http.Client{Timeout: timeout}, maxRetries: 2, sleep: sleepContext}
+}
+
+func limitsWithDefaults(limits Limits) Limits {
+	if limits.ContextTokens == 0 {
+		limits.ContextTokens = defaultContextTokens
+	}
+	if limits.MaxOutputTokens == 0 {
+		limits.MaxOutputTokens = defaultMaxOutputTokens
+	}
+	if limits.MaxRequestBytes == 0 {
+		limits.MaxRequestBytes = defaultMaxRequestBytes
+	}
+	if limits.MaxEntries == 0 {
+		limits.MaxEntries = defaultMaxEntries
+	}
+	return limits
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) error {
@@ -310,13 +327,21 @@ func targetLocaleFromRequests(items []TranslationRequest) string {
 	return "es_es"
 }
 
-func (o *openAITranslator) Translate(ctx context.Context, items []TranslationRequest) (TranslationBatch, error) {
-	identity := ProviderIdentity{Provider: o.profile.Name, Model: o.profile.Model}
+type requestEstimate struct {
+	InputTokens int
+	Bytes       int
+}
+
+func estimateRequest(body []byte) requestEstimate {
+	return requestEstimate{InputTokens: (len(body) + 2) / 3, Bytes: len(body)}
+}
+
+func (o *openAITranslator) requestBody(items []TranslationRequest) ([]byte, error) {
 	userPrompt, err := translationUserPrompt(items)
 	if err != nil {
-		return TranslationBatch{}, err
+		return nil, err
 	}
-	requestBody := map[string]any{"model": o.profile.Model, "messages": []map[string]string{{"role": "system", "content": translationSystemPrompt}, {"role": "user", "content": userPrompt}}, "temperature": 0}
+	requestBody := map[string]any{"model": o.profile.Model, "messages": []map[string]string{{"role": "system", "content": translationSystemPrompt}, {"role": "user", "content": userPrompt}}, "temperature": 0, "max_tokens": o.profile.Limits.MaxOutputTokens}
 	if o.profile.Mode == modeJSONSchema {
 		requestBody["response_format"] = map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "translation_batch", "strict": true, "schema": translationSchemaFor(len(items), o.profile.ArrayLength)}}
 	} else {
@@ -325,7 +350,51 @@ func (o *openAITranslator) Translate(ctx context.Context, items []TranslationReq
 	if o.profile.RequireParams {
 		requestBody["provider"] = map[string]bool{"require_parameters": true}
 	}
-	body, err := json.Marshal(requestBody)
+	return json.Marshal(requestBody)
+}
+
+func (o *openAITranslator) Plan(items []TranslationRequest) ([][]TranslationRequest, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	limits := o.profile.Limits
+	plans := make([][]TranslationRequest, 0, (len(items)+limits.MaxEntries-1)/limits.MaxEntries)
+	for start := 0; start < len(items); {
+		end := start
+		for end < len(items) && end-start < limits.MaxEntries {
+			candidate := items[start : end+1]
+			body, err := o.requestBody(candidate)
+			if err != nil {
+				return nil, err
+			}
+			estimate := estimateRequest(body)
+			violated := ""
+			switch {
+			case estimate.InputTokens+limits.MaxOutputTokens > limits.ContextTokens:
+				violated = fmt.Sprintf("context token limit %d", limits.ContextTokens)
+			case estimate.Bytes > limits.MaxRequestBytes:
+				violated = fmt.Sprintf("request byte limit %d", limits.MaxRequestBytes)
+			}
+			if violated != "" {
+				if end == start {
+					return nil, fmt.Errorf("translation request %s exceeds provider %s", items[start].ID, violated)
+				}
+				break
+			}
+			end++
+		}
+		if end == start {
+			return nil, fmt.Errorf("translation request %s exceeds provider entry limit %d", items[start].ID, limits.MaxEntries)
+		}
+		plans = append(plans, append([]TranslationRequest(nil), items[start:end]...))
+		start = end
+	}
+	return plans, nil
+}
+
+func (o *openAITranslator) Translate(ctx context.Context, items []TranslationRequest) (TranslationBatch, error) {
+	identity := ProviderIdentity{Provider: o.profile.Name, Model: o.profile.Model}
+	body, err := o.requestBody(items)
 	if err != nil {
 		return TranslationBatch{}, err
 	}
@@ -564,6 +633,15 @@ type chainTranslator struct {
 	current   int
 	output    io.Writer
 	logf      func(string, ...any)
+}
+
+// Plan uses the currently active provider. Fallback providers retry the same
+// planned slice until provider-aware fallback re-planning is introduced.
+func (c *chainTranslator) Plan(items []TranslationRequest) ([][]TranslationRequest, error) {
+	if c.current >= len(c.providers) {
+		return nil, errors.New("translation chain has no active provider")
+	}
+	return c.providers[c.current].Plan(items)
 }
 
 func (c *chainTranslator) Translate(ctx context.Context, items []TranslationRequest) (TranslationBatch, error) {

@@ -13,8 +13,25 @@ import (
 )
 
 type fakeTranslator struct {
-	calls [][]TranslationRequest
-	fn    func(int, []TranslationRequest) ([]TranslationResult, error)
+	calls      [][]TranslationRequest
+	fn         func(int, []TranslationRequest) ([]TranslationResult, error)
+	maxEntries int
+}
+
+func (f *fakeTranslator) Plan(requests []TranslationRequest) ([][]TranslationRequest, error) {
+	maxEntries := f.maxEntries
+	if maxEntries <= 0 {
+		maxEntries = len(requests)
+	}
+	var plans [][]TranslationRequest
+	for start := 0; start < len(requests); start += maxEntries {
+		end := start + maxEntries
+		if end > len(requests) {
+			end = len(requests)
+		}
+		plans = append(plans, append([]TranslationRequest(nil), requests[start:end]...))
+	}
+	return plans, nil
 }
 
 func validTranslationResults(requests []TranslationRequest) []TranslationResult {
@@ -49,8 +66,8 @@ func TestTranslateWorkspaceDeduplicatesBatchesCachesAndResumes(t *testing.T) {
 		catalogTranslationEntry("id-b", "Hello %s", "assets/b.json"),
 		catalogTranslationEntry("id-c", "World", "assets/c.json"),
 	})
-	provider := &fakeTranslator{}
-	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{BatchSize: 1, BatchBytes: 4096}); err != nil {
+	provider := &fakeTranslator{maxEntries: 1}
+	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(provider.calls) != 2 {
@@ -84,6 +101,7 @@ func TestTranslateWorkspaceDeduplicatesBatchesCachesAndResumes(t *testing.T) {
 		t.Fatalf("source invalidation calls = %#v", provider.calls)
 	}
 	provider.calls = nil
+	provider.maxEntries = 0
 	cache = readTranslationCache(t, translationCachePath(workspace))
 	cache.PromptVersion = "en-target-minecraft-v1"
 	data, _ := json.Marshal(cache)
@@ -116,11 +134,11 @@ func TestTranslateWorkspaceDeduplicatesBatchesCachesAndResumes(t *testing.T) {
 	}
 }
 
-func TestTranslateWorkspaceSplitsByBytesDeterministically(t *testing.T) {
+func TestTranslateWorkspaceUsesDeterministicContiguousProviderPlans(t *testing.T) {
 	workspace := t.TempDir()
 	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("c", strings.Repeat("C", 40), "c"), catalogTranslationEntry("a", strings.Repeat("A", 40), "a"), catalogTranslationEntry("b", strings.Repeat("B", 40), "b")})
-	provider := &fakeTranslator{}
-	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{BatchSize: 20, BatchBytes: 340}); err != nil {
+	provider := &fakeTranslator{maxEntries: 1}
+	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(provider.calls) != 3 {
@@ -129,13 +147,58 @@ func TestTranslateWorkspaceSplitsByBytesDeterministically(t *testing.T) {
 	firstOrder := []string{provider.calls[0][0].ID, provider.calls[1][0].ID, provider.calls[2][0].ID}
 	secondWorkspace := t.TempDir()
 	writeTranslationCatalog(t, secondWorkspace, []CatalogEntryV1{catalogTranslationEntry("c", strings.Repeat("C", 40), "c"), catalogTranslationEntry("a", strings.Repeat("A", 40), "a"), catalogTranslationEntry("b", strings.Repeat("B", 40), "b")})
-	second := &fakeTranslator{}
-	if err := translateWorkspace(context.Background(), secondWorkspace, second, translationOptions{BatchSize: 20, BatchBytes: 340}); err != nil {
+	second := &fakeTranslator{maxEntries: 1}
+	if err := translateWorkspace(context.Background(), secondWorkspace, second, translationOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	secondOrder := []string{second.calls[0][0].ID, second.calls[1][0].ID, second.calls[2][0].ID}
 	if strings.Join(firstOrder, ",") != strings.Join(secondOrder, ",") {
 		t.Fatalf("nondeterministic order: %v != %v", firstOrder, secondOrder)
+	}
+}
+
+func TestTranslateWorkspaceOrdersContextAndKeepsCatalogOutputOrder(t *testing.T) {
+	workspace := t.TempDir()
+	entries := []CatalogEntryV1{
+		catalogTranslationEntry("duplicate-first", "Same", "assets/zeta/lang/z.json"),
+		catalogTranslationEntry("beta-2", "Beta two", "assets/beta/lang/shared.json"),
+		catalogTranslationEntry("alpha-1", "Alpha one", "assets/alpha/lang/shared.json"),
+		catalogTranslationEntry("duplicate-later", "Same", "assets/alpha/lang/a.json"),
+		catalogTranslationEntry("beta-1", "Beta one", `assets\beta\lang\shared.json`),
+		catalogTranslationEntry("alpha-2", "Alpha two", "assets/alpha/lang/shared.json"),
+	}
+	writeTranslationCatalog(t, workspace, entries)
+	provider := &fakeTranslator{}
+	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.calls) != 1 {
+		t.Fatalf("calls=%#v", provider.calls)
+	}
+	requests := provider.calls[0]
+	wantIDs := []string{"alpha-1", "alpha-2", "beta-2", "beta-1", "duplicate-first"}
+	if len(requests) != len(wantIDs) {
+		t.Fatalf("requests=%#v", requests)
+	}
+	for i, want := range wantIDs {
+		if requests[i].ID != want {
+			t.Fatalf("request order=%#v want=%#v", requests, wantIDs)
+		}
+	}
+	if requests[len(requests)-1].SourceFile != "assets/zeta/lang/z.json" {
+		t.Fatalf("duplicate representative=%#v", requests[len(requests)-1])
+	}
+	cache := readTranslationCache(t, translationCachePath(workspace))
+	if len(cache.Entries) != len(entries) {
+		t.Fatalf("cache=%#v", cache.Entries)
+	}
+	for i, entry := range entries {
+		if cache.Entries[i].ID != entry.ID {
+			t.Fatalf("cache order=%#v", cache.Entries)
+		}
+	}
+	if cache.Entries[0].Translation != cache.Entries[3].Translation {
+		t.Fatalf("duplicate fan-out=%#v", cache.Entries)
 	}
 }
 
@@ -281,13 +344,13 @@ func TestTranslateWorkspaceReportsDuplicateFanOutAsCatalogEntries(t *testing.T) 
 func TestTranslateWorkspacePreservesPartialBatchesAndPreviousCache(t *testing.T) {
 	workspace := t.TempDir()
 	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "One", "a"), catalogTranslationEntry("b", "Two", "b")})
-	provider := &fakeTranslator{fn: func(call int, requests []TranslationRequest) ([]TranslationResult, error) {
+	provider := &fakeTranslator{maxEntries: 1, fn: func(call int, requests []TranslationRequest) ([]TranslationResult, error) {
 		if call == 2 {
 			return nil, errors.New("interrupted")
 		}
 		return []TranslationResult{{ID: requests[0].ID, Translated: "ES " + requests[0].Source}}, nil
 	}}
-	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{BatchSize: 1}); err == nil {
+	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{}); err == nil {
 		t.Fatal("interruption error = nil")
 	}
 	before := mustRead(t, translationCachePath(workspace))
@@ -306,8 +369,8 @@ func TestTranslateWorkspacePreservesPartialBatchesAndPreviousCache(t *testing.T)
 	if err := os.WriteFile(translationCachePath(workspace), before, 0644); err != nil {
 		t.Fatal(err)
 	}
-	resume := &fakeTranslator{}
-	if err := translateWorkspace(context.Background(), workspace, resume, translationOptions{BatchSize: 1}); err != nil {
+	resume := &fakeTranslator{maxEntries: 1}
+	if err := translateWorkspace(context.Background(), workspace, resume, translationOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(resume.calls) != 1 || resume.calls[0][0].ID == readTranslationCache(t, translationCachePath(workspace)).Entries[0].ID {
@@ -337,13 +400,13 @@ func TestTranslateWorkspaceDoesNotPublishStaleEntriesUnderNewPromptVersion(t *te
 		t.Fatal(err)
 	}
 
-	interrupted := &fakeTranslator{fn: func(call int, requests []TranslationRequest) ([]TranslationResult, error) {
+	interrupted := &fakeTranslator{maxEntries: 1, fn: func(call int, requests []TranslationRequest) ([]TranslationResult, error) {
 		if call == 2 {
 			return nil, errors.New("interrupted")
 		}
 		return validTranslationResults(requests), nil
 	}}
-	if err := translateWorkspace(context.Background(), workspace, interrupted, translationOptions{BatchSize: 1}); err == nil {
+	if err := translateWorkspace(context.Background(), workspace, interrupted, translationOptions{}); err == nil {
 		t.Fatal("interruption error = nil")
 	}
 	if len(interrupted.calls) != 2 {

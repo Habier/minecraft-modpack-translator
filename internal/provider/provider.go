@@ -38,6 +38,7 @@ type Batch struct {
 }
 
 type Translator interface {
+	Plan([]Request) ([][]Request, error)
 	Translate(context.Context, []Request) (Batch, error)
 }
 

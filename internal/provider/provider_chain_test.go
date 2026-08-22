@@ -424,6 +424,9 @@ func TestOpenAIAdapterContractAndStructuredResponse(t *testing.T) {
 		if body["temperature"] != float64(0) {
 			t.Fatalf("temperature=%#v", body["temperature"])
 		}
+		if body["max_tokens"] != float64(777) {
+			t.Fatalf("max_tokens=%#v", body["max_tokens"])
+		}
 		messages := body["messages"].([]any)
 		if len(messages) != 2 || messages[0].(map[string]any)["role"] != "system" || messages[1].(map[string]any)["role"] != "user" {
 			t.Fatalf("messages=%#v", messages)
@@ -452,7 +455,7 @@ func TestOpenAIAdapterContractAndStructuredResponse(t *testing.T) {
 	}))
 	defer server.Close()
 	base, _ := url.Parse(server.URL + "/v1")
-	translator := newOpenAITranslator(providerProfile{Name: "gemini", Key: "secret", Model: "configured", BaseURL: base, Mode: modeJSONSchema})
+	translator := newOpenAITranslator(providerProfile{Name: "gemini", Key: "secret", Model: "configured", BaseURL: base, Mode: modeJSONSchema, Limits: Limits{MaxOutputTokens: 777}})
 	batch, err := translator.Translate(context.Background(), []TranslationRequest{{ID: "a", Source: injectedSource, SourceKind: "json", SourceFile: "assets/mod/lang/en_us.json", TargetLocale: "fr_fr"}})
 	if err != nil || batch.Identity.Provider != "gemini" || batch.Identity.Model != "configured" || batch.Results[0].Translated != "Hola" {
 		t.Fatalf("batch=%#v error=%v", batch, err)
@@ -658,6 +661,13 @@ func validTranslationResults(requests []TranslationRequest) []TranslationResult 
 
 func (s *scriptedTranslator) ProviderIdentity() ProviderIdentity { return s.identity }
 
+func (s *scriptedTranslator) Plan(requests []TranslationRequest) ([][]TranslationRequest, error) {
+	if len(requests) == 0 {
+		return nil, nil
+	}
+	return [][]TranslationRequest{append([]TranslationRequest(nil), requests...)}, nil
+}
+
 func (s *scriptedTranslator) Translate(_ context.Context, requests []TranslationRequest) (TranslationBatch, error) {
 	s.calls++
 	if len(s.errors) >= s.calls && s.errors[s.calls-1] != nil {
@@ -691,5 +701,21 @@ func TestChainAdvancesPermanentlyOnlyForQuota(t *testing.T) {
 	batch, err := (&chainTranslator{providers: []Translator{authNowAdvances, fallback}}).Translate(context.Background(), nil)
 	if err != nil || fallback.calls != 1 || batch.Identity.Provider != "fallback" {
 		t.Fatalf("batch=%#v error=%v fallback=%d", batch, err, fallback.calls)
+	}
+}
+
+func TestChainPlansWithCurrentlyActiveProvider(t *testing.T) {
+	requests := []TranslationRequest{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+	first := newOpenAITranslator(providerProfile{Name: "first", Model: "m1", Mode: modeJSONObject, Limits: Limits{ContextTokens: 1 << 20, MaxOutputTokens: 1, MaxRequestBytes: 1 << 20, MaxEntries: 1}})
+	second := newOpenAITranslator(providerProfile{Name: "second", Model: "m2", Mode: modeJSONObject, Limits: Limits{ContextTokens: 1 << 20, MaxOutputTokens: 1, MaxRequestBytes: 1 << 20, MaxEntries: 3}})
+	chain := &chainTranslator{providers: []Translator{first, second}}
+	plans, err := chain.Plan(requests)
+	if err != nil || len(plans) != 3 {
+		t.Fatalf("first plans=%#v error=%v", plans, err)
+	}
+	chain.current = 1
+	plans, err = chain.Plan(requests)
+	if err != nil || len(plans) != 1 || len(plans[0]) != 3 {
+		t.Fatalf("second plans=%#v error=%v", plans, err)
 	}
 }
