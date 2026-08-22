@@ -88,7 +88,7 @@ Use either:
 
 ## Translation Providers
 
-Configure provider order with `PROVIDER_CHAIN`. Each non-`ollama` entry is treated as an OpenAI-compatible API and must have its own explicit block.
+Configure provider order with `PROVIDER_CHAIN`. Every entry uses the shared OpenAI-compatible provider implementation. Cloud entries require their own explicit block; Ollama requires `PROVIDER_OLLAMA_BASE_URL`, `PROVIDER_OLLAMA_MODEL`, `PROVIDER_OLLAMA_TIMEOUT`, and `PROVIDER_OLLAMA_MODE` without an API key.
 
 ```text
 PROVIDER_CHAIN=deepinfra,together,ollama
@@ -109,6 +109,8 @@ Names in `PROVIDER_CHAIN` may contain letters, numbers, underscores, and hyphens
 Supported provider modes are `json_schema` and `json_object`. Cloud provider base URLs must be HTTPS URLs without credentials, query strings, or fragments.
 
 Ollama is used only when `ollama` appears in `PROVIDER_CHAIN`. If `PROVIDER_CHAIN` is unset, the default chain is `ollama` only.
+
+Set all four Ollama variables explicitly. Use `PROVIDER_OLLAMA_BASE_URL=http://localhost:11434/v1`, `PROVIDER_OLLAMA_MODEL=qwen3:8b`, `PROVIDER_OLLAMA_TIMEOUT=10m`, and `PROVIDER_OLLAMA_MODE=json_schema`. The translator appends `/chat/completions` to the configured base URL exactly; local HTTP is allowed only for Ollama. `PROVIDER_CHAIN` remains optional and defaults to Ollama only.
 
 API keys can come from your environment, from a `.env` file beside the compiled executable, or from a `.env` file in the current working directory when that directory is different. Keep `.env` private; it is plain text.
 

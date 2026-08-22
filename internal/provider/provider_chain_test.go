@@ -15,15 +15,16 @@ import (
 )
 
 func TestProviderProfilesFromEnvDefaultChainUsesOllamaOnly(t *testing.T) {
-	profiles, err := providerProfilesFromEnv(func(string) string { return "" })
-	if err != nil || len(profiles) != 0 {
+	env := providerChainEnv("")
+	profiles, err := providerProfilesFromEnv(func(name string) string { return env[name] })
+	if err != nil || len(profiles) != 1 || profiles[0].Name != "ollama" || profiles[0].BaseURL.String() != "http://localhost:11434/v1" {
 		t.Fatalf("profiles=%#v error=%v", profiles, err)
 	}
-	translator, model, err := buildTranslatorChain(func(string) string { return "" })
+	translator, model, err := buildTranslatorChain(func(name string) string { return env[name] })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := providerNames(translator); got != "ollama" || model != defaultOllamaModel {
+	if got := providerNames(translator); got != "ollama" || model != "qwen3:8b" {
 		t.Fatalf("chain=%s model=%s", got, model)
 	}
 }
@@ -58,7 +59,7 @@ func TestBuildTranslatorChainPreservesConfiguredOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := providerNames(translator); got != "together,deepinfra,ollama" || model != defaultOllamaModel {
+	if got := providerNames(translator); got != "together,deepinfra,ollama" || model != "qwen3:8b" {
 		t.Fatalf("chain=%s model=%s", got, model)
 	}
 }
@@ -140,12 +141,12 @@ func TestBuildTranslatorChainIncludesOllamaOnlyWhenPresent(t *testing.T) {
 func TestProviderChainSummaryIsOrderedAndSecretFree(t *testing.T) {
 	env := providerChainEnv("deepinfra,together,ollama")
 	delete(env, "PROVIDER_TOGETHER_MODEL")
-	env["OLLAMA_MODEL"] = "local-model"
+	env["PROVIDER_OLLAMA_MODEL"] = "local-model"
 	summary := providerChainSummary(func(name string) string { return env[name] })
 	want := []string{
 		"deepinfra: enabled model=deep-model mode=json_schema",
 		"together: disabled (PROVIDER_TOGETHER_MODEL not set)",
-		"ollama: enabled model=local-model (final fallback)",
+		"ollama: enabled model=local-model mode=json_schema (final fallback)",
 	}
 	position := -1
 	for _, text := range want {
@@ -173,6 +174,10 @@ func providerChainEnv(chain string) map[string]string {
 		"PROVIDER_TOGETHER_API_KEY":   "together-secret",
 		"PROVIDER_TOGETHER_MODEL":     "together-model",
 		"PROVIDER_TOGETHER_MODE":      "json_object",
+		"PROVIDER_OLLAMA_BASE_URL":    "http://localhost:11434/v1",
+		"PROVIDER_OLLAMA_MODEL":       "qwen3:8b",
+		"PROVIDER_OLLAMA_TIMEOUT":     "10m",
+		"PROVIDER_OLLAMA_MODE":        "json_schema",
 	}
 }
 
@@ -180,16 +185,92 @@ func providerNames(translator Translator) string {
 	chain := translator.(*chainTranslator)
 	var names []string
 	for _, provider := range chain.providers {
-		switch typed := provider.(type) {
-		case *openAITranslator:
-			names = append(names, typed.profile.Name)
-		case *ollamaTranslator:
-			names = append(names, "ollama")
-		default:
+		typed, ok := provider.(*openAITranslator)
+		if !ok {
 			names = append(names, fmt.Sprintf("%T", provider))
+			continue
 		}
+		names = append(names, typed.profile.Name)
 	}
 	return strings.Join(names, ",")
+}
+
+func TestOllamaUsesOpenAICompatibleAdapter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" || r.Method != http.MethodPost {
+			t.Errorf("request=%s %s", r.Method, r.URL.Path)
+		}
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			t.Errorf("unexpected authorization header %q", auth)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		format := body["response_format"].(map[string]any)
+		if body["model"] != "test:8b" || format["type"] != "json_schema" {
+			t.Fatalf("body=%#v", body)
+		}
+		results := format["json_schema"].(map[string]any)["schema"].(map[string]any)["properties"].(map[string]any)["results"].(map[string]any)
+		if results["minItems"] != float64(1) || results["maxItems"] != float64(1) {
+			t.Fatalf("Ollama schema=%#v", results)
+		}
+		io.WriteString(w, `{"choices":[{"message":{"content":"{\"results\":[{\"id\":\"a\",\"translated\":\"Hola\"}]}"}}]}`)
+	}))
+	defer server.Close()
+
+	env := map[string]string{"PROVIDER_OLLAMA_BASE_URL": server.URL + "/v1", "PROVIDER_OLLAMA_MODEL": "test:8b", "PROVIDER_OLLAMA_TIMEOUT": "3m", "PROVIDER_OLLAMA_MODE": "json_schema"}
+	translator, _, err := buildTranslatorChain(func(name string) string { return env[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ollama := translator.(*chainTranslator).providers[0].(*openAITranslator)
+	if ollama.client.Timeout != 3*time.Minute {
+		t.Fatalf("timeout=%v", ollama.client.Timeout)
+	}
+	batch, err := translator.Translate(context.Background(), []TranslationRequest{{ID: "a", Source: "Hello"}})
+	if err != nil || batch.Identity.Provider != "ollama" || batch.Results[0].Translated != "Hola" {
+		t.Fatalf("batch=%#v error=%v", batch, err)
+	}
+}
+
+func TestOllamaConfigValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"invalid scheme", map[string]string{"PROVIDER_OLLAMA_BASE_URL": "ftp://localhost/v1", "PROVIDER_OLLAMA_MODEL": "model", "PROVIDER_OLLAMA_TIMEOUT": "10m", "PROVIDER_OLLAMA_MODE": "json_schema"}, "PROVIDER_OLLAMA_BASE_URL"},
+		{"credentials", map[string]string{"PROVIDER_OLLAMA_BASE_URL": "http://user:pass@localhost/v1", "PROVIDER_OLLAMA_MODEL": "model", "PROVIDER_OLLAMA_TIMEOUT": "10m", "PROVIDER_OLLAMA_MODE": "json_schema"}, "PROVIDER_OLLAMA_BASE_URL"},
+		{"query", map[string]string{"PROVIDER_OLLAMA_BASE_URL": "http://localhost/v1?secret=x", "PROVIDER_OLLAMA_MODEL": "model", "PROVIDER_OLLAMA_TIMEOUT": "10m", "PROVIDER_OLLAMA_MODE": "json_schema"}, "PROVIDER_OLLAMA_BASE_URL"},
+		{"invalid model", map[string]string{"PROVIDER_OLLAMA_BASE_URL": "http://localhost/v1", "PROVIDER_OLLAMA_MODEL": "bad\nmodel", "PROVIDER_OLLAMA_TIMEOUT": "10m", "PROVIDER_OLLAMA_MODE": "json_schema"}, "control characters"},
+		{"invalid timeout", map[string]string{"PROVIDER_OLLAMA_BASE_URL": "http://localhost/v1", "PROVIDER_OLLAMA_MODEL": "model", "PROVIDER_OLLAMA_TIMEOUT": "0s", "PROVIDER_OLLAMA_MODE": "json_schema"}, "PROVIDER_OLLAMA_TIMEOUT"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := providerProfileFromEnv(newProviderChainEntry("ollama", "OLLAMA"), func(name string) string { return tt.env[name] })
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+
+	valid := providerChainEnv("")
+	profile, err := providerProfileFromEnv(newProviderChainEntry("ollama", "OLLAMA"), func(name string) string { return valid[name] })
+	if err != nil || profile.BaseURL.String() != "http://localhost:11434/v1" || profile.Model != "qwen3:8b" || profile.Timeout != 10*time.Minute || profile.Key != "" {
+		t.Fatalf("profile=%#v error=%v", profile, err)
+	}
+
+	for _, missing := range []string{"PROVIDER_OLLAMA_BASE_URL", "PROVIDER_OLLAMA_MODEL", "PROVIDER_OLLAMA_TIMEOUT", "PROVIDER_OLLAMA_MODE"} {
+		t.Run("missing "+missing, func(t *testing.T) {
+			env := providerChainEnv("")
+			delete(env, missing)
+			_, err := providerProfileFromEnv(newProviderChainEntry("ollama", "OLLAMA"), func(name string) string { return env[name] })
+			if err == nil || !strings.Contains(err.Error(), missing) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
 }
 
 func TestCerebrasAdapterContractAndIdentity(t *testing.T) {

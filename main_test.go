@@ -21,6 +21,9 @@ func TestRunTranslateExtractsCachesAndCreatesShareableZip(t *testing.T) {
 	modpack, jar := testModpack(t)
 	writeTestJar(t, jar, []zipEntry{{"assets/example/lang/en_us.json", []byte(`{"key":"Hello %s"}`)}})
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/chat/completions" {
+			t.Errorf("request path = %q", request.URL.Path)
+		}
 		var body struct {
 			Messages []struct {
 				Content string `json:"content"`
@@ -38,11 +41,13 @@ func TestRunTranslateExtractsCachesAndCreatesShareableZip(t *testing.T) {
 			t.Fatal(err)
 		}
 		content, _ := json.Marshal(map[string]any{"results": []TranslationResult{{ID: items[0].ID, Translated: "Hola " + strings.TrimPrefix(items[0].Source, "Hello ")}}})
-		json.NewEncoder(writer).Encode(map[string]any{"message": map[string]string{"content": string(content)}, "done": true})
+		json.NewEncoder(writer).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": string(content)}}}})
 	}))
 	defer server.Close()
-	t.Setenv("OLLAMA_HOST", server.URL)
-	t.Setenv("OLLAMA_MODEL", "fake:1")
+	t.Setenv("PROVIDER_OLLAMA_BASE_URL", server.URL+"/v1")
+	t.Setenv("PROVIDER_OLLAMA_MODEL", "fake:1")
+	t.Setenv("PROVIDER_OLLAMA_TIMEOUT", "1m")
+	t.Setenv("PROVIDER_OLLAMA_MODE", "json_schema")
 	output, err := captureStdout(t, func() error { return run([]string{modpack, "--translate"}) })
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +81,9 @@ func TestRunTranslateDoesNotCreateZipAfterPartialTranslation(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/chat/completions" {
+			t.Errorf("request path = %q", request.URL.Path)
+		}
 		var body struct {
 			Messages []struct {
 				Content string `json:"content"`
@@ -99,11 +107,13 @@ func TestRunTranslateDoesNotCreateZipAfterPartialTranslation(t *testing.T) {
 			results = append(results, TranslationResult{ID: "unknown", Translated: "bad"})
 		}
 		content, _ := json.Marshal(map[string]any{"results": results})
-		json.NewEncoder(writer).Encode(map[string]any{"message": map[string]string{"content": string(content)}, "done": true})
+		json.NewEncoder(writer).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": string(content)}}}})
 	}))
 	defer server.Close()
-	t.Setenv("OLLAMA_HOST", server.URL)
-	t.Setenv("OLLAMA_MODEL", "fake:1")
+	t.Setenv("PROVIDER_OLLAMA_BASE_URL", server.URL+"/v1")
+	t.Setenv("PROVIDER_OLLAMA_MODEL", "fake:1")
+	t.Setenv("PROVIDER_OLLAMA_TIMEOUT", "1m")
+	t.Setenv("PROVIDER_OLLAMA_MODE", "json_schema")
 	err := run([]string{modpack, "--translate"})
 	if err == nil {
 		t.Fatal("run succeeded after partial translation")

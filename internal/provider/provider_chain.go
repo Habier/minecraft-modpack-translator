@@ -36,6 +36,7 @@ type providerProfile struct {
 	Mode             capabilityMode
 	ArrayLength      bool
 	RequireParams    bool
+	Timeout          time.Duration
 }
 
 func providerProfilesFromEnv(getenv func(string) string) ([]providerProfile, error) {
@@ -45,9 +46,6 @@ func providerProfilesFromEnv(getenv func(string) string) ([]providerProfile, err
 	}
 	var profiles []providerProfile
 	for _, entry := range entries {
-		if entry.name == "ollama" {
-			continue
-		}
 		profile, err := providerProfileFromEnv(entry, getenv)
 		if err != nil {
 			return nil, err
@@ -60,6 +58,7 @@ func providerProfilesFromEnv(getenv func(string) string) ([]providerProfile, err
 func providerProfileFromEnv(entry providerChainEntry, getenv func(string) string) (providerProfile, error) {
 	prefix := "PROVIDER_" + entry.envSuffix + "_"
 	baseEnv, keyEnv, modelEnv, modeEnv := providerEnvNames(prefix)
+	timeoutEnv := prefix + "TIMEOUT"
 	rawBase := getenv(baseEnv)
 	base := strings.TrimSpace(rawBase)
 	if base == "" {
@@ -67,7 +66,7 @@ func providerProfileFromEnv(entry providerChainEntry, getenv func(string) string
 	}
 	rawKey := getenv(keyEnv)
 	key := strings.TrimSpace(rawKey)
-	if key == "" {
+	if entry.capabilities.apiKeyRequired && key == "" {
 		return providerProfile{}, fmt.Errorf("%s is required for provider %s", keyEnv, entry.name)
 	}
 	rawModel := getenv(modelEnv)
@@ -82,11 +81,24 @@ func providerProfileFromEnv(entry providerChainEntry, getenv func(string) string
 	if containsControlCharacter(entry.name) || containsControlCharacter(rawBase) || containsControlCharacter(rawKey) || containsControlCharacter(rawModel) {
 		return providerProfile{}, fmt.Errorf("provider %s configuration contains invalid control characters", entry.name)
 	}
-	parsed, err := parseProviderURL(baseEnv, base)
+	parsed, err := parseProviderURL(baseEnv, base, entry.capabilities.allowHTTP)
 	if err != nil {
 		return providerProfile{}, err
 	}
-	return providerProfile{Name: entry.name, Key: key, Model: model, BaseURL: parsed, Mode: mode}, nil
+	var timeout time.Duration
+	if entry.capabilities.timeoutSupported {
+		value := strings.TrimSpace(getenv(timeoutEnv))
+		if entry.capabilities.timeoutRequired && value == "" {
+			return providerProfile{}, fmt.Errorf("%s is required for provider %s", timeoutEnv, entry.name)
+		}
+		if value != "" {
+			timeout, err = time.ParseDuration(value)
+			if err != nil || timeout <= 0 {
+				return providerProfile{}, fmt.Errorf("%s must be a positive Go duration such as 10m or 2h", timeoutEnv)
+			}
+		}
+	}
+	return providerProfile{Name: entry.name, Key: key, Model: model, BaseURL: parsed, Mode: mode, ArrayLength: entry.capabilities.arrayLength, RequireParams: entry.capabilities.requireParams, Timeout: timeout}, nil
 }
 
 func providerEnvNames(prefix string) (baseEnv, keyEnv, modelEnv, modeEnv string) {
@@ -94,14 +106,32 @@ func providerEnvNames(prefix string) (baseEnv, keyEnv, modelEnv, modeEnv string)
 }
 
 type providerChainEntry struct {
-	name      string
-	envSuffix string
+	name         string
+	envSuffix    string
+	capabilities providerCapabilities
+}
+
+type providerCapabilities struct {
+	apiKeyRequired   bool
+	allowHTTP        bool
+	timeoutSupported bool
+	timeoutRequired  bool
+	arrayLength      bool
+	requireParams    bool
+}
+
+func newProviderChainEntry(name, envSuffix string) providerChainEntry {
+	capabilities := providerCapabilities{apiKeyRequired: true}
+	if name == "ollama" {
+		capabilities = providerCapabilities{allowHTTP: true, timeoutSupported: true, timeoutRequired: true, arrayLength: true}
+	}
+	return providerChainEntry{name: name, envSuffix: envSuffix, capabilities: capabilities}
 }
 
 func providerChainFromEnv(getenv func(string) string) ([]providerChainEntry, error) {
 	chain := strings.TrimSpace(getenv("PROVIDER_CHAIN"))
 	if chain == "" {
-		return []providerChainEntry{{name: "ollama", envSuffix: "OLLAMA"}}, nil
+		return []providerChainEntry{newProviderChainEntry("ollama", "OLLAMA")}, nil
 	}
 	parts := strings.Split(chain, ",")
 	entries := make([]providerChainEntry, 0, len(parts))
@@ -141,7 +171,7 @@ func normalizeProviderName(name string) (providerChainEntry, error) {
 			return providerChainEntry{}, fmt.Errorf("PROVIDER_CHAIN provider %q is invalid; use only letters, numbers, underscores, and hyphens", name)
 		}
 	}
-	return providerChainEntry{name: strings.ToLower(name), envSuffix: suffix.String()}, nil
+	return newProviderChainEntry(strings.ToLower(name), suffix.String()), nil
 }
 
 func parseProviderMode(value, envName, providerName string) (capabilityMode, error) {
@@ -161,10 +191,15 @@ func containsControlCharacter(value string) bool {
 	return strings.ContainsFunc(value, unicode.IsControl)
 }
 
-func parseProviderURL(envName, value string) (*url.URL, error) {
+func parseProviderURL(envName, value string, allowHTTP bool) (*url.URL, error) {
 	parsed, err := url.Parse(value)
-	if err != nil || containsControlCharacter(value) || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return nil, fmt.Errorf("%s must be an HTTPS URL without credentials, query, or fragment", envName)
+	valid := err == nil && parsed != nil && (parsed.Scheme == "https" || allowHTTP && parsed.Scheme == "http") && parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
+	if containsControlCharacter(value) || !valid {
+		protocol := "HTTPS"
+		if allowHTTP {
+			protocol = "HTTP or HTTPS"
+		}
+		return nil, fmt.Errorf("%s must be an %s URL without credentials, query, or fragment", envName, protocol)
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	return parsed, nil
@@ -178,7 +213,11 @@ type openAITranslator struct {
 }
 
 func newOpenAITranslator(profile providerProfile) *openAITranslator {
-	return &openAITranslator{profile: profile, client: &http.Client{Timeout: 2 * time.Minute}, maxRetries: 2, sleep: sleepContext}
+	timeout := profile.Timeout
+	if timeout == 0 {
+		timeout = 2 * time.Minute
+	}
+	return &openAITranslator{profile: profile, client: &http.Client{Timeout: timeout}, maxRetries: 2, sleep: sleepContext}
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) error {
@@ -279,7 +318,9 @@ func (o *openAITranslator) doWithRetry(ctx context.Context, body []byte) (*http.
 		if err != nil {
 			return nil, &ProviderError{Identity: identity, Kind: ErrorConfig, Reason: "could not construct request"}
 		}
-		request.Header.Set("Authorization", "Bearer "+o.profile.Key)
+		if o.profile.Key != "" {
+			request.Header.Set("Authorization", "Bearer "+o.profile.Key)
+		}
 		request.Header.Set("Content-Type", "application/json")
 		response, callErr := o.client.Do(request)
 		if callErr == nil && response.StatusCode < 500 && response.StatusCode != http.StatusTooManyRequests {
@@ -526,32 +567,27 @@ func providerChainSummary(getenv func(string) string) string {
 		return strings.Join(append(lines, "  invalid: "+err.Error()), "\n")
 	}
 	for i, entry := range entries {
-		if entry.name == "ollama" {
-			model := strings.TrimSpace(getenv("OLLAMA_MODEL"))
-			if model == "" {
-				model = defaultOllamaModel
-			}
-			suffix := ""
-			if i == len(entries)-1 {
-				suffix = " (final fallback)"
-			}
-			lines = append(lines, fmt.Sprintf("  %s: enabled model=%s%s", entry.name, model, suffix))
-			continue
-		}
 		prefix := "PROVIDER_" + entry.envSuffix + "_"
 		baseEnv, keyEnv, modelEnv, modeEnv := providerEnvNames(prefix)
-		base, key, model, mode := strings.TrimSpace(getenv(baseEnv)), strings.TrimSpace(getenv(keyEnv)), strings.TrimSpace(getenv(modelEnv)), strings.TrimSpace(getenv(modeEnv))
+		timeoutEnv := prefix + "TIMEOUT"
+		base, key, model, mode, timeout := strings.TrimSpace(getenv(baseEnv)), strings.TrimSpace(getenv(keyEnv)), strings.TrimSpace(getenv(modelEnv)), strings.TrimSpace(getenv(modeEnv)), strings.TrimSpace(getenv(timeoutEnv))
+		suffix := ""
+		if i == len(entries)-1 && entry.name == "ollama" {
+			suffix = " (final fallback)"
+		}
 		switch {
 		case base == "":
-			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)", entry.name, baseEnv))
-		case key == "":
-			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)", entry.name, keyEnv))
+			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)%s", entry.name, baseEnv, suffix))
+		case entry.capabilities.apiKeyRequired && key == "":
+			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)%s", entry.name, keyEnv, suffix))
 		case model == "":
-			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)", entry.name, modelEnv))
+			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)%s", entry.name, modelEnv, suffix))
 		case mode == "":
-			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)", entry.name, modeEnv))
+			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)%s", entry.name, modeEnv, suffix))
+		case entry.capabilities.timeoutRequired && timeout == "":
+			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)%s", entry.name, timeoutEnv, suffix))
 		default:
-			lines = append(lines, fmt.Sprintf("  %s: enabled model=%s mode=%s", entry.name, model, mode))
+			lines = append(lines, fmt.Sprintf("  %s: enabled model=%s mode=%s%s", entry.name, model, mode, suffix))
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -579,21 +615,12 @@ func buildTranslatorChainWithLogger(getenv func(string) string, logf func(string
 	providers := make([]Translator, 0, len(entries))
 	cacheModel := ""
 	for _, entry := range entries {
-		if entry.name == "ollama" {
-			host, model, timeout, err := ollamaConfigFromEnv(getenv)
-			if err != nil {
-				return nil, "", err
-			}
-			providers = append(providers, newOllamaTranslator(host, model, timeout))
-			cacheModel = model
-			continue
-		}
 		profile, err := providerProfileFromEnv(entry, getenv)
 		if err != nil {
 			return nil, "", err
 		}
 		providers = append(providers, newOpenAITranslator(profile))
-		if cacheModel == "" {
+		if cacheModel == "" || entry.name == "ollama" {
 			cacheModel = profile.Model
 		}
 	}

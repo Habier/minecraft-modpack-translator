@@ -142,7 +142,7 @@ Windows SmartScreen may warn if the binary is not code-signed. Only allow it aft
 
 ## Translation providers
 
-Provider order is configured with `PROVIDER_CHAIN`. Each non-`ollama` entry is treated as an OpenAI-compatible provider.
+Provider order is configured with `PROVIDER_CHAIN`. Every entry uses an OpenAI-compatible endpoint. Cloud providers require HTTPS and an API key; Ollama allows local HTTP and requires no API key.
 
 If `PROVIDER_CHAIN` is unset, the tool uses local Ollama only. This is a breaking change from older releases that looked for named cloud provider variables automatically.
 
@@ -195,9 +195,10 @@ Useful Ollama variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
-| `OLLAMA_MODEL` | `qwen3:8b` | Local model name |
-| `OLLAMA_TIMEOUT` | `30m` | Per-request timeout |
+| `PROVIDER_OLLAMA_BASE_URL` | `http://localhost:11434/v1` in the example | OpenAI-compatible Ollama base URL; `/chat/completions` is appended |
+| `PROVIDER_OLLAMA_MODEL` | `qwen3:8b` in the example | Local model name |
+| `PROVIDER_OLLAMA_TIMEOUT` | `10m` in the example | Positive Go duration used as the per-request timeout |
+| `PROVIDER_OLLAMA_MODE` | `json_schema` in the example | Structured-output mode |
 
 The selected model must already exist in Ollama. Modpack Translator does not download models automatically.
 
@@ -315,7 +316,7 @@ ollama pull qwen3:8b
 ollama ls
 ```
 
-If you changed `OLLAMA_MODEL`, pull that exact model name instead.
+Pull the exact model named by `PROVIDER_OLLAMA_MODEL` instead.
 
 ### A cloud provider fails
 
