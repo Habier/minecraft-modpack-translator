@@ -51,7 +51,7 @@ When no path is provided, the tool searches common Minecraft launcher locations.
 - A Minecraft Java modpack folder with a `mods` directory
 - Version metadata from `mmc-pack.json` or `manifest.json`
 - Optional cloud provider API keys and model names
-- Optional local Ollama fallback with the `qwen3:8b` model
+- Optional local Ollama fallback with the `qwen3.5:9b` model
 
 ## What it supports
 
@@ -110,7 +110,7 @@ Supported provider modes are `json_schema` and `json_object`. Cloud provider bas
 
 Ollama is used only when `ollama` appears in `PROVIDER_CHAIN`. If `PROVIDER_CHAIN` is unset, the default chain is `ollama` only.
 
-Set all four Ollama variables explicitly. Use `PROVIDER_OLLAMA_BASE_URL=http://localhost:11434/v1`, `PROVIDER_OLLAMA_MODEL=qwen3:8b`, `PROVIDER_OLLAMA_TIMEOUT=10m`, and `PROVIDER_OLLAMA_MODE=json_schema`. The translator appends `/chat/completions` to the configured base URL exactly; local HTTP is allowed only for Ollama. `PROVIDER_CHAIN` remains optional and defaults to Ollama only.
+Set all four Ollama variables explicitly. Use `PROVIDER_OLLAMA_BASE_URL=http://localhost:11434/v1`, `PROVIDER_OLLAMA_MODEL=qwen3.5:9b`, `PROVIDER_OLLAMA_TIMEOUT=10m`, and `PROVIDER_OLLAMA_MODE=json_schema`. The translator appends `/chat/completions` to the configured base URL exactly; local HTTP is allowed only for Ollama. `PROVIDER_CHAIN` remains optional and defaults to Ollama only.
 
 API keys can come from your environment, from a `.env` file beside the compiled executable, or from a `.env` file in the current working directory when that directory is different. Keep `.env` private; it is plain text.
 

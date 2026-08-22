@@ -188,7 +188,7 @@ Install Ollama from the official download page:
 Then download the default model:
 
 ```text
-ollama pull qwen3:8b
+ollama pull qwen3.5:9b-q4_K_M
 ```
 
 Useful Ollama variables:
@@ -196,7 +196,7 @@ Useful Ollama variables:
 | Variable | Default | Purpose |
 |---|---|---|
 | `PROVIDER_OLLAMA_BASE_URL` | `http://localhost:11434/v1` in the example | OpenAI-compatible Ollama base URL; `/chat/completions` is appended |
-| `PROVIDER_OLLAMA_MODEL` | `qwen3:8b` in the example | Local model name |
+| `PROVIDER_OLLAMA_MODEL` | `qwen3.5:9b` in the example | Local model name |
 | `PROVIDER_OLLAMA_TIMEOUT` | `10m` in the example | Positive Go duration used as the per-request timeout |
 | `PROVIDER_OLLAMA_MODE` | `json_schema` in the example | Structured-output mode |
 
@@ -312,7 +312,7 @@ curl "http://localhost:11434/api/version"
 Pull the configured model:
 
 ```text
-ollama pull qwen3:8b
+ollama pull qwen3.5:9b
 ollama ls
 ```
 
@@ -348,7 +348,7 @@ Do not delete the modpack's `mods`, `config`, `defaultconfigs`, `patchouli_books
 Ollama is separate software. If you no longer need the default model:
 
 ```text
-ollama rm qwen3:8b
+ollama rm qwen3.5:9b
 ```
 
 ## For developers
