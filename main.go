@@ -49,11 +49,18 @@ func run(args []string) error {
 	return runWithLanguageLimits(args, defaultLanguageLimits())
 }
 
-func runWithLanguageLimits(args []string, limits languageLimits) (err error) {
-	options, err := parseCLI(args)
-	if err != nil {
-		return err
-	}
+func runWithLanguageLimits(args []string, limits languageLimits) error {
+	command := newRootCommand(commandDependencies{
+		languageLimits: limits,
+		getenv:         os.Getenv,
+		output:         os.Stdout,
+		runTranslation: runTranslation,
+	})
+	command.SetArgs(args)
+	return command.Execute()
+}
+
+func runTranslation(options cliOptions, limits languageLimits) (err error) {
 	pathArgs := []string{}
 	if options.modpackPath != "" {
 		pathArgs = append(pathArgs, options.modpackPath)

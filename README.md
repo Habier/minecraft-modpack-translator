@@ -44,6 +44,14 @@ modpack-translator --translate --refresh "C:\path\to\your\modpack"
 
 By default, existing target-language files are read and already-covered keys are skipped. `--refresh` re-extracts those keys and overwrites the generated target entries. It does not make malformed target files valid; use `--force` if you want to continue past malformed target-language files.
 
+Check the models visible to every configured provider:
+
+```powershell
+modpack-translator models
+```
+
+The command queries every provider in `PROVIDER_CHAIN`, even when an earlier provider fails. It marks the configured model when available, reports when it is missing, and exits with an error after printing all sections if any provider failed.
+
 When no path is provided, the tool searches common Minecraft launcher locations. If it finds one modpack, it uses it. If it finds several, it asks you to choose one by number.
 
 ## Requirements
