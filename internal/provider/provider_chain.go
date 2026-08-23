@@ -25,11 +25,19 @@ const (
 	defaultContextTokens   = 8192
 	defaultMaxOutputTokens = 2048
 	defaultMaxRequestBytes = 98304
-	defaultMaxEntries      = 20
+	defaultMaxEntries      = 100
 	maxContextTokens       = 1048576
 	maxOutputTokens        = 262144
 	maxRequestBytes        = 4 << 20
 	maxEntries             = 10000
+
+	// Token counts vary by model and tokenizer. Three UTF-8 bytes per token is
+	// deliberately more conservative than the common four-byte approximation.
+	estimatedBytesPerToken = 3
+	// Chat framing is not represented completely by the serialized HTTP body.
+	requestFramingTokens = 32
+	// Leave room for tokenizer variance and provider-added request framing.
+	tokenSafetyMarginPercent = 10
 )
 
 type capabilityMode string
@@ -328,12 +336,18 @@ func targetLocaleFromRequests(items []TranslationRequest) string {
 }
 
 type requestEstimate struct {
-	InputTokens int
-	Bytes       int
+	InputTokens  int
+	SafetyTokens int
+	Bytes        int
 }
 
 func estimateRequest(body []byte) requestEstimate {
-	return requestEstimate{InputTokens: (len(body) + 2) / 3, Bytes: len(body)}
+	inputTokens := (len(body)+estimatedBytesPerToken-1)/estimatedBytesPerToken + requestFramingTokens
+	return requestEstimate{
+		InputTokens:  inputTokens,
+		SafetyTokens: (inputTokens*tokenSafetyMarginPercent + 99) / 100,
+		Bytes:        len(body),
+	}
 }
 
 func (o *openAITranslator) requestBody(items []TranslationRequest) ([]byte, error) {
@@ -370,7 +384,7 @@ func (o *openAITranslator) Plan(items []TranslationRequest) ([][]TranslationRequ
 			estimate := estimateRequest(body)
 			violated := ""
 			switch {
-			case estimate.InputTokens+limits.MaxOutputTokens > limits.ContextTokens:
+			case estimate.InputTokens+estimate.SafetyTokens+limits.MaxOutputTokens > limits.ContextTokens:
 				violated = fmt.Sprintf("context token limit %d", limits.ContextTokens)
 			case estimate.Bytes > limits.MaxRequestBytes:
 				violated = fmt.Sprintf("request byte limit %d", limits.MaxRequestBytes)

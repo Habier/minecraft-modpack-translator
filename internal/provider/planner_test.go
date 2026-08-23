@@ -11,7 +11,7 @@ func plannerForTest(limits Limits) *openAITranslator {
 	return newOpenAITranslator(providerProfile{Name: "test", Model: "model", BaseURL: base, Mode: modeJSONSchema, Limits: limits})
 }
 
-func TestEstimateSerializedRequestUsesConservativeUTF8Bytes(t *testing.T) {
+func TestEstimateSerializedRequestUsesConservativeCompleteRequestBudget(t *testing.T) {
 	tests := []struct {
 		name   string
 		source string
@@ -30,7 +30,9 @@ func TestEstimateSerializedRequestUsesConservativeUTF8Bytes(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := estimateRequest(body)
-			if got.Bytes != len(body) || got.InputTokens != (len(body)+2)/3 {
+			wantInput := (len(body)+estimatedBytesPerToken-1)/estimatedBytesPerToken + requestFramingTokens
+			wantSafety := (wantInput*tokenSafetyMarginPercent + 99) / 100
+			if got.Bytes != len(body) || got.InputTokens != wantInput || got.SafetyTokens != wantSafety {
 				t.Fatalf("estimate=%#v bytes=%d", got, len(body))
 			}
 		})
@@ -56,8 +58,8 @@ func TestPlannerBoundariesAndOversizedSingletons(t *testing.T) {
 		wantError   string
 		wantBatches int
 	}{
-		{name: "exact token boundary", limits: Limits{ContextTokens: tokenEstimate.InputTokens + 7, MaxOutputTokens: 7, MaxRequestBytes: len(tokenBody), MaxEntries: 1}, wantBatches: 1},
-		{name: "one over token boundary", limits: Limits{ContextTokens: tokenEstimate.InputTokens + 6, MaxOutputTokens: 7, MaxRequestBytes: len(tokenBody) + 100, MaxEntries: 1}, wantError: "safe-id exceeds provider context token limit"},
+		{name: "exact token boundary", limits: Limits{ContextTokens: tokenEstimate.InputTokens + tokenEstimate.SafetyTokens + 7, MaxOutputTokens: 7, MaxRequestBytes: len(tokenBody), MaxEntries: 1}, wantBatches: 1},
+		{name: "one over token boundary", limits: Limits{ContextTokens: tokenEstimate.InputTokens + tokenEstimate.SafetyTokens + 6, MaxOutputTokens: 7, MaxRequestBytes: len(tokenBody) + 100, MaxEntries: 1}, wantError: "safe-id exceeds provider context token limit"},
 		{name: "exact request byte boundary", limits: Limits{ContextTokens: 1 << 20, MaxOutputTokens: 1, MaxRequestBytes: len(byteBody), MaxEntries: 1}, wantBatches: 1},
 		{name: "one over request byte boundary", limits: Limits{ContextTokens: 1 << 20, MaxOutputTokens: 1, MaxRequestBytes: len(byteBody) - 1, MaxEntries: 1}, wantError: "safe-id exceeds provider request byte limit"},
 	}
@@ -74,6 +76,59 @@ func TestPlannerBoundariesAndOversizedSingletons(t *testing.T) {
 				t.Fatalf("plans=%#v error=%v", plans, err)
 			}
 		})
+	}
+}
+
+func TestPlannerReservesConfiguredOutputAndSafetyCapacity(t *testing.T) {
+	request := TranslationRequest{ID: "a", Source: strings.Repeat("content ", 20), TargetLocale: "es_es"}
+	probe := plannerForTest(Limits{MaxOutputTokens: 1})
+	body, err := probe.requestBody([]TranslationRequest{request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	estimate := estimateRequest(body)
+	contextTokens := estimate.InputTokens + estimate.SafetyTokens + 1
+
+	if _, err := plannerForTest(Limits{ContextTokens: contextTokens, MaxOutputTokens: 1, MaxRequestBytes: 1 << 20, MaxEntries: 1}).Plan([]TranslationRequest{request}); err != nil {
+		t.Fatalf("request at complete budget boundary failed: %v", err)
+	}
+	if _, err := plannerForTest(Limits{ContextTokens: contextTokens, MaxOutputTokens: 2, MaxRequestBytes: 1 << 20, MaxEntries: 1}).Plan([]TranslationRequest{request}); err == nil || !strings.Contains(err.Error(), "context token limit") {
+		t.Fatalf("increased output reservation error=%v", err)
+	}
+}
+
+func TestPlannerBuildsVariableSizedTokenBoundedPlans(t *testing.T) {
+	requests := []TranslationRequest{
+		{ID: "a", Source: "short"},
+		{ID: "b", Source: "short"},
+		{ID: "c", Source: strings.Repeat("long ", 80)},
+		{ID: "d", Source: "short"},
+	}
+	probe := plannerForTest(Limits{MaxOutputTokens: 1})
+	twoBody, err := probe.requestBody(requests[:2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	twoEstimate := estimateRequest(twoBody)
+	longBody, err := probe.requestBody(requests[2:3])
+	if err != nil {
+		t.Fatal(err)
+	}
+	longEstimate := estimateRequest(longBody)
+	contextTokens := twoEstimate.InputTokens + twoEstimate.SafetyTokens + 1
+	if longBudget := longEstimate.InputTokens + longEstimate.SafetyTokens + 1; longBudget > contextTokens {
+		contextTokens = longBudget
+	}
+	limits := Limits{ContextTokens: contextTokens, MaxOutputTokens: 1, MaxRequestBytes: 1 << 20, MaxEntries: 10}
+	plans, err := plannerForTest(limits).Plan(requests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 3 {
+		t.Fatalf("plans=%#v", plans)
+	}
+	if got := []int{len(plans[0]), len(plans[1]), len(plans[2])}; got[0] != 2 || got[1] != 1 || got[2] != 1 {
+		t.Fatalf("plan sizes=%v plans=%#v", got, plans)
 	}
 }
 

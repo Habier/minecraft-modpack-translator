@@ -90,7 +90,7 @@ func TestProviderLimitsFromEnv(t *testing.T) {
 	}{
 		{
 			name: "defaults",
-			want: Limits{ContextTokens: 8192, MaxOutputTokens: 2048, MaxRequestBytes: 98304, MaxEntries: 20},
+			want: Limits{ContextTokens: 8192, MaxOutputTokens: 2048, MaxRequestBytes: 98304, MaxEntries: 100},
 		},
 		{
 			name: "explicit values",
@@ -261,7 +261,7 @@ func TestProviderChainSummaryIsOrderedAndSecretFree(t *testing.T) {
 	want := []string{
 		"deepinfra: enabled model=deep-model mode=json_schema",
 		"together: disabled (PROVIDER_TOGETHER_MODEL not set)",
-		"ollama: enabled model=local-model mode=json_schema limits=context_tokens:8192,max_output_tokens:2048,max_request_bytes:98304,max_entries:20 (final fallback)",
+		"ollama: enabled model=local-model mode=json_schema limits=context_tokens:8192,max_output_tokens:2048,max_request_bytes:98304,max_entries:100 (final fallback)",
 	}
 	position := -1
 	for _, text := range want {
@@ -294,7 +294,7 @@ func TestProviderChainSummaryReportsLimitsAndSafeErrors(t *testing.T) {
 
 	env["PROVIDER_DEEPINFRA_MAX_OUTPUT_TOKENS"] = "4096"
 	summary = providerChainSummary(func(name string) string { return env[name] })
-	if !strings.Contains(summary, "limits=context_tokens:32768,max_output_tokens:4096,max_request_bytes:98304,max_entries:20") {
+	if !strings.Contains(summary, "limits=context_tokens:32768,max_output_tokens:4096,max_request_bytes:98304,max_entries:100") {
 		t.Fatalf("summary=%q", summary)
 	}
 }
