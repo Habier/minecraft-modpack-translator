@@ -15,8 +15,9 @@ type Request struct {
 }
 
 type Result struct {
-	ID         string `json:"id"`
-	Translated string `json:"translated"`
+	ID         string   `json:"id"`
+	Translated string   `json:"translated"`
+	Identity   Identity `json:"-"`
 }
 
 type Identity struct {
@@ -39,6 +40,9 @@ type Batch struct {
 
 type Translator interface {
 	Plan([]Request) ([][]Request, error)
+	// Translate may return completed Results together with an error when later
+	// work fails. Callers must validate and consume them before retrying only
+	// the unfinished requests.
 	Translate(context.Context, []Request) (Batch, error)
 }
 

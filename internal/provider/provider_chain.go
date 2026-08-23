@@ -438,6 +438,9 @@ func (o *openAITranslator) Translate(ctx context.Context, items []TranslationReq
 	if err := decodeStrictJSON([]byte(envelope.Choices[0].Message.Content), &result); err != nil {
 		return TranslationBatch{Identity: identity}, &invalidTranslationResponseError{err: errors.New("provider returned invalid structured translation JSON")}
 	}
+	for i := range result.Results {
+		result.Results[i].Identity = identity
+	}
 	return TranslationBatch{Results: result.Results, Identity: identity}, nil
 }
 
@@ -635,8 +638,8 @@ type chainTranslator struct {
 	logf      func(string, ...any)
 }
 
-// Plan uses the currently active provider. Fallback providers retry the same
-// planned slice until provider-aware fallback re-planning is introduced.
+// Plan uses the currently active provider. Translate owns re-planning after a
+// provider transition because only the chain knows which provider is active.
 func (c *chainTranslator) Plan(items []TranslationRequest) ([][]TranslationRequest, error) {
 	if c.current >= len(c.providers) {
 		return nil, errors.New("translation chain has no active provider")
@@ -645,19 +648,106 @@ func (c *chainTranslator) Plan(items []TranslationRequest) ([][]TranslationReque
 }
 
 func (c *chainTranslator) Translate(ctx context.Context, items []TranslationRequest) (TranslationBatch, error) {
+	if len(items) == 0 {
+		return c.translateEmpty(ctx)
+	}
+	requested := make(map[string]TranslationRequest, len(items))
+	for _, item := range items {
+		if _, exists := requested[item.ID]; exists {
+			return TranslationBatch{}, invalidAggregationError("duplicate request ID %q", item.ID)
+		}
+		requested[item.ID] = item
+	}
+	completed := make(map[string]TranslationResult, len(items))
 	var exhausted []string
 	for c.current < len(c.providers) {
+		if err := ctx.Err(); err != nil {
+			return completedBatch(items, completed, ProviderIdentity{}), err
+		}
+		unfinished := unfinishedRequests(items, completed)
+		plans, err := c.providers[c.current].Plan(unfinished)
+		if err != nil {
+			return completedBatch(items, completed, translatorIdentity(c.providers[c.current])), err
+		}
+		if err := validatePlans(unfinished, plans); err != nil {
+			return completedBatch(items, completed, translatorIdentity(c.providers[c.current])), err
+		}
 		identity := translatorIdentity(c.providers[c.current])
-		fmt.Fprintf(c.writer(), "Provider attempt: %s model=%s entries=%d\n", identity.Provider, identity.Model, len(items))
-		result, err := c.providers[c.current].Translate(ctx, items)
+		advanced := false
+		for _, plan := range plans {
+			if err := ctx.Err(); err != nil {
+				return completedBatch(items, completed, identity), err
+			}
+			fmt.Fprintf(c.writer(), "Provider attempt: %s model=%s entries=%d\n", identity.Provider, identity.Model, len(plan))
+			batch, err := c.providers[c.current].Translate(ctx, plan)
+			if err == nil {
+				ordered, aggregationErr := validateAndOrderResults(plan, batch.Results, identity)
+				if aggregationErr != nil {
+					return completedBatch(items, completed, identity), aggregationErr
+				}
+				for _, result := range ordered {
+					completed[result.ID] = result
+				}
+				continue
+			}
+			if ctx.Err() != nil {
+				return completedBatch(items, completed, identity), ctx.Err()
+			}
+			var providerErr *ProviderError
+			if !errors.As(err, &providerErr) {
+				return completedBatch(items, completed, identity), err
+			}
+			c.log("provider %s model %s entries=%d kind=%s reason=%s", providerErr.Identity.Provider, providerErr.Identity.Model, len(plan), providerErr.Kind, safeTransitionReason(providerErr))
+			exhausted = append(exhausted, providerErr.Identity.Provider)
+			c.current++
+			advanced = true
+			if c.current < len(c.providers) {
+				next := translatorIdentity(c.providers[c.current])
+				fmt.Fprintf(c.writer(), "Provider transition: %s -> %s kind=%s reason=%s\n", providerErr.Identity.Provider, next.Provider, providerErr.Kind, safeTransitionReason(providerErr))
+			}
+			break
+		}
+		if !advanced {
+			results := make([]TranslationResult, len(items))
+			for i, item := range items {
+				results[i] = completed[item.ID]
+			}
+			return TranslationBatch{Results: results, Identity: identity}, nil
+		}
+	}
+	c.log("chain exhausted providers=%s", strings.Join(exhausted, ", "))
+	return completedBatch(items, completed, ProviderIdentity{Provider: "translation chain"}), &ProviderError{Identity: ProviderIdentity{Provider: "translation chain"}, Kind: ErrorQuota, Reason: "configured providers exhausted: " + strings.Join(exhausted, ", ")}
+}
+
+func completedBatch(items []TranslationRequest, completed map[string]TranslationResult, identity ProviderIdentity) TranslationBatch {
+	results := make([]TranslationResult, 0, len(completed))
+	for _, item := range items {
+		if result, ok := completed[item.ID]; ok {
+			results = append(results, result)
+		}
+	}
+	return TranslationBatch{Results: results, Identity: identity}
+}
+
+func (c *chainTranslator) translateEmpty(ctx context.Context) (TranslationBatch, error) {
+	var exhausted []string
+	for c.current < len(c.providers) {
+		if err := ctx.Err(); err != nil {
+			return TranslationBatch{}, err
+		}
+		identity := translatorIdentity(c.providers[c.current])
+		fmt.Fprintf(c.writer(), "Provider attempt: %s model=%s entries=0\n", identity.Provider, identity.Model)
+		batch, err := c.providers[c.current].Translate(ctx, nil)
 		if err == nil {
-			return result, nil
+			return batch, nil
+		}
+		if ctx.Err() != nil {
+			return TranslationBatch{}, ctx.Err()
 		}
 		var providerErr *ProviderError
 		if !errors.As(err, &providerErr) {
 			return TranslationBatch{}, err
 		}
-		c.log("provider %s model %s entries=%d kind=%s reason=%s", providerErr.Identity.Provider, providerErr.Identity.Model, len(items), providerErr.Kind, safeTransitionReason(providerErr))
 		exhausted = append(exhausted, providerErr.Identity.Provider)
 		c.current++
 		if c.current < len(c.providers) {
@@ -665,8 +755,65 @@ func (c *chainTranslator) Translate(ctx context.Context, items []TranslationRequ
 			fmt.Fprintf(c.writer(), "Provider transition: %s -> %s kind=%s reason=%s\n", providerErr.Identity.Provider, next.Provider, providerErr.Kind, safeTransitionReason(providerErr))
 		}
 	}
-	c.log("chain exhausted providers=%s", strings.Join(exhausted, ", "))
 	return TranslationBatch{}, &ProviderError{Identity: ProviderIdentity{Provider: "translation chain"}, Kind: ErrorQuota, Reason: "configured providers exhausted: " + strings.Join(exhausted, ", ")}
+}
+
+func unfinishedRequests(items []TranslationRequest, completed map[string]TranslationResult) []TranslationRequest {
+	unfinished := make([]TranslationRequest, 0, len(items)-len(completed))
+	for _, item := range items {
+		if _, ok := completed[item.ID]; !ok {
+			unfinished = append(unfinished, item)
+		}
+	}
+	return unfinished
+}
+
+func validatePlans(items []TranslationRequest, plans [][]TranslationRequest) error {
+	position := 0
+	for planIndex, plan := range plans {
+		if len(plan) == 0 {
+			return fmt.Errorf("provider plan %d is empty", planIndex+1)
+		}
+		for _, item := range plan {
+			if position >= len(items) || item != items[position] {
+				return fmt.Errorf("provider plans must preserve contiguous request order at position %d", position)
+			}
+			position++
+		}
+	}
+	if position != len(items) {
+		return fmt.Errorf("provider plans covered %d of %d requests", position, len(items))
+	}
+	return nil
+}
+
+func validateAndOrderResults(requests []TranslationRequest, results []TranslationResult, identity ProviderIdentity) ([]TranslationResult, error) {
+	requested := make(map[string]int, len(requests))
+	for i, request := range requests {
+		requested[request.ID] = i
+	}
+	ordered := make([]TranslationResult, len(requests))
+	seen := make(map[string]struct{}, len(results))
+	for _, result := range results {
+		position, ok := requested[result.ID]
+		if !ok {
+			return nil, invalidAggregationError("unknown result ID %q", result.ID)
+		}
+		if _, duplicate := seen[result.ID]; duplicate {
+			return nil, invalidAggregationError("duplicate result ID %q", result.ID)
+		}
+		seen[result.ID] = struct{}{}
+		result.Identity = identity
+		ordered[position] = result
+	}
+	if len(seen) != len(requests) {
+		return nil, invalidAggregationError("received %d results for %d requested IDs", len(seen), len(requests))
+	}
+	return ordered, nil
+}
+
+func invalidAggregationError(format string, args ...any) error {
+	return &invalidTranslationResponseError{err: fmt.Errorf(format, args...)}
 }
 
 func (c *chainTranslator) log(format string, args ...any) {

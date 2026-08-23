@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,21 @@ type fakeTranslator struct {
 	calls      [][]TranslationRequest
 	fn         func(int, []TranslationRequest) ([]TranslationResult, error)
 	maxEntries int
+	identity   ProviderIdentity
+}
+
+type mixedIdentityTranslator struct{}
+
+func (mixedIdentityTranslator) Plan(requests []TranslationRequest) ([][]TranslationRequest, error) {
+	return [][]TranslationRequest{requests}, nil
+}
+
+func (mixedIdentityTranslator) Translate(_ context.Context, requests []TranslationRequest) (TranslationBatch, error) {
+	results := validTranslationResults(requests)
+	for i := range results {
+		results[i].Identity = ProviderIdentity{Provider: fmt.Sprintf("provider-%d", i+1), Model: fmt.Sprintf("model-%d", i+1)}
+	}
+	return TranslationBatch{Results: results, Identity: ProviderIdentity{Provider: "batch", Model: "legacy"}}, nil
 }
 
 func (f *fakeTranslator) Plan(requests []TranslationRequest) ([][]TranslationRequest, error) {
@@ -52,11 +68,22 @@ func TestValidateTranslationResultsRejectsWrongCount(t *testing.T) {
 func (f *fakeTranslator) Translate(_ context.Context, requests []TranslationRequest) (TranslationBatch, error) {
 	copyRequests := append([]TranslationRequest(nil), requests...)
 	f.calls = append(f.calls, copyRequests)
+	identity := f.identity
+	if identity.Provider == "" {
+		identity = ProviderIdentity{Provider: "fake", Model: "test"}
+	}
 	if f.fn != nil {
 		results, err := f.fn(len(f.calls), requests)
-		return TranslationBatch{Results: results, Identity: ProviderIdentity{Provider: "fake", Model: "test"}}, err
+		for i := range results {
+			results[i].Identity = identity
+		}
+		return TranslationBatch{Results: results, Identity: identity}, err
 	}
-	return TranslationBatch{Results: validTranslationResults(requests), Identity: ProviderIdentity{Provider: "fake", Model: "test"}}, nil
+	results := validTranslationResults(requests)
+	for i := range results {
+		results[i].Identity = identity
+	}
+	return TranslationBatch{Results: results, Identity: identity}, nil
 }
 
 func TestTranslateWorkspaceDeduplicatesBatchesCachesAndResumes(t *testing.T) {
@@ -228,6 +255,175 @@ func TestTranslateWorkspacePrintsValidatedProviderIdentity(t *testing.T) {
 	if err != nil || !strings.Contains(output, "Validated batch: provider=fake model=test entries=1") {
 		t.Fatalf("output=%q error=%v", output, err)
 	}
+}
+
+func TestTranslateWorkspaceCachesPerResultProviderIdentity(t *testing.T) {
+	workspace := t.TempDir()
+	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "One", "a"), catalogTranslationEntry("b", "Two", "b")})
+	if err := translateWorkspace(context.Background(), workspace, mixedIdentityTranslator{}, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	entries := readTranslationCache(t, translationCachePath(workspace)).Entries
+	if len(entries) != 2 || entries[0].Provider != "provider-1" || entries[0].Model != "model-1" || entries[1].Provider != "provider-2" || entries[1].Model != "model-2" {
+		t.Fatalf("cache provenance=%#v", entries)
+	}
+}
+
+func TestTranslateWorkspacePublishesPartialResultsAndRetriesOnlyUnfinished(t *testing.T) {
+	workspace := t.TempDir()
+	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "One", "a"), catalogTranslationEntry("b", "Two", "b")})
+	translator := &fakeTranslator{fn: func(call int, requests []TranslationRequest) ([]TranslationResult, error) {
+		if call == 1 {
+			if got := requestIDs(requests); got != "a,b" {
+				t.Fatalf("first request IDs=%s", got)
+			}
+			return validTranslationResults(requests[:1]), &invalidTranslationResponseError{err: errors.New("invalid later child")}
+		}
+		if got := requestIDs(requests); got != "b" {
+			t.Fatalf("retry request IDs=%s", got)
+		}
+		return validTranslationResults(requests), nil
+	}}
+	if err := translateWorkspace(context.Background(), workspace, translator, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	entries := readTranslationCache(t, translationCachePath(workspace)).Entries
+	if len(entries) != 2 || entries[0].Provider != "fake" || entries[0].Model != "test" || len(translator.calls) != 2 {
+		t.Fatalf("calls=%#v cache=%#v", translator.calls, entries)
+	}
+}
+
+func TestTranslateWorkspaceDoesNotPublishInvalidPartialResult(t *testing.T) {
+	workspace := t.TempDir()
+	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "One", "a"), catalogTranslationEntry("b", "&6Two&r", "b")})
+	translator := &fakeTranslator{fn: func(call int, requests []TranslationRequest) ([]TranslationResult, error) {
+		if call == 1 {
+			return []TranslationResult{{ID: requests[0].ID, Translated: requests[0].Source}, {ID: requests[1].ID, Translated: "missing markers"}}, &invalidTranslationResponseError{err: errors.New("invalid later child")}
+		}
+		if got := requestIDs(requests); got != "b" {
+			t.Fatalf("retry request IDs=%s", got)
+		}
+		return validTranslationResults(requests), nil
+	}}
+	if err := translateWorkspace(context.Background(), workspace, translator, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	entries := readTranslationCache(t, translationCachePath(workspace)).Entries
+	if len(entries) != 2 || !strings.Contains(entries[1].Translation, "&6Two&r") || entries[1].Translation == "missing markers" || len(translator.calls) != 2 {
+		t.Fatalf("calls=%#v cache=%#v", translator.calls, entries)
+	}
+}
+
+func TestTranslateWorkspaceTerminatesWhenResponseAnomalyFollowsCompleteResults(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		fn   func([]TranslationRequest) ([]TranslationResult, error)
+	}{
+		{
+			name: "unknown extra output",
+			fn: func(requests []TranslationRequest) ([]TranslationResult, error) {
+				results := validTranslationResults(requests)
+				return append(results, TranslationResult{ID: "unknown", Translated: "extra"}), nil
+			},
+		},
+		{
+			name: "accompanying invalid response",
+			fn: func(requests []TranslationRequest) ([]TranslationResult, error) {
+				return validTranslationResults(requests), &invalidTranslationResponseError{err: errors.New("residual invalid response")}
+			},
+		},
+		{
+			name: "repeated invalid response cannot reach empty retry",
+			fn: func(requests []TranslationRequest) ([]TranslationResult, error) {
+				return validTranslationResults(requests), &invalidTranslationResponseError{err: errors.New("would repeat forever")}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "One", "a"), catalogTranslationEntry("b", "Two", "b")})
+			emptyCalls := 0
+			translator := &fakeTranslator{fn: func(_ int, requests []TranslationRequest) ([]TranslationResult, error) {
+				if len(requests) == 0 {
+					emptyCalls++
+					return nil, &invalidTranslationResponseError{err: errors.New("empty translation call")}
+				}
+				return tt.fn(requests)
+			}}
+			if err := translateWorkspace(context.Background(), workspace, translator, translationOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			entries := readTranslationCache(t, translationCachePath(workspace)).Entries
+			if len(translator.calls) != 1 || emptyCalls != 0 || len(entries) != 2 {
+				t.Fatalf("calls=%#v empty=%d cache=%#v", translator.calls, emptyCalls, entries)
+			}
+		})
+	}
+}
+
+func TestTranslateWorkspaceRetriesOnlyConflictingDuplicateID(t *testing.T) {
+	workspace := t.TempDir()
+	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "One", "a"), catalogTranslationEntry("b", "Two", "b")})
+	translator := &fakeTranslator{fn: func(call int, requests []TranslationRequest) ([]TranslationResult, error) {
+		if call == 1 {
+			return []TranslationResult{
+				{ID: requests[0].ID, Translated: requests[0].Source},
+				{ID: requests[1].ID, Translated: "conflict-first"},
+				{ID: requests[1].ID, Translated: "conflict-second"},
+			}, nil
+		}
+		if got := requestIDs(requests); got != "b" {
+			t.Fatalf("retry request IDs=%s", got)
+		}
+		entries := readTranslationCache(t, translationCachePath(workspace)).Entries
+		if len(entries) != 1 || entries[0].ID != "a" {
+			t.Fatalf("cache before duplicate retry=%#v", entries)
+		}
+		return validTranslationResults(requests), nil
+	}}
+	if err := translateWorkspace(context.Background(), workspace, translator, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	entries := readTranslationCache(t, translationCachePath(workspace)).Entries
+	if len(translator.calls) != 2 || requestIDs(translator.calls[0]) != "a,b" || requestIDs(translator.calls[1]) != "b" || len(entries) != 2 || entries[1].Translation == "conflict-first" || entries[1].Translation == "conflict-second" {
+		t.Fatalf("calls=%#v cache=%#v", translator.calls, entries)
+	}
+}
+
+func TestTranslateWorkspaceCachesPartialResultsBeforeProviderExhaustion(t *testing.T) {
+	workspace := t.TempDir()
+	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "One", "a"), catalogTranslationEntry("b", "Two", "b")})
+	identity := ProviderIdentity{Provider: "first", Model: "model-a"}
+	exhausted := &fakeTranslator{identity: identity, fn: func(_ int, requests []TranslationRequest) ([]TranslationResult, error) {
+		return validTranslationResults(requests[:1]), &ProviderError{Identity: ProviderIdentity{Provider: "translation chain"}, Kind: ErrorQuota, Reason: "configured providers exhausted"}
+	}}
+	if err := translateWorkspace(context.Background(), workspace, exhausted, translationOptions{}); err == nil {
+		t.Fatal("provider exhaustion unexpectedly succeeded")
+	}
+	entries := readTranslationCache(t, translationCachePath(workspace)).Entries
+	if len(entries) != 1 || entries[0].ID != "a" || entries[0].Provider != identity.Provider || entries[0].Model != identity.Model {
+		t.Fatalf("partial cache=%#v wanted identity=%#v", entries, identity)
+	}
+	resume := &fakeTranslator{fn: func(_ int, requests []TranslationRequest) ([]TranslationResult, error) {
+		if got := requestIDs(requests); got != "b" {
+			t.Fatalf("resume request IDs=%s", got)
+		}
+		return validTranslationResults(requests), nil
+	}}
+	if err := translateWorkspace(context.Background(), workspace, resume, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(resume.calls) != 1 || len(readTranslationCache(t, translationCachePath(workspace)).Entries) != 2 {
+		t.Fatalf("resume calls=%#v", resume.calls)
+	}
+}
+
+func requestIDs(requests []TranslationRequest) string {
+	ids := make([]string, len(requests))
+	for i, request := range requests {
+		ids[i] = request.ID
+	}
+	return strings.Join(ids, ",")
 }
 
 func TestTranslateWorkspaceRejectsDroppedAmpersandFormattingMarker(t *testing.T) {

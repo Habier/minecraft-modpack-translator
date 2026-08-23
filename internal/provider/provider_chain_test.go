@@ -636,7 +636,7 @@ func TestBoundedRetryReachesFallback(t *testing.T) {
 	cloud.sleep = func(ctx context.Context, d time.Duration) error { delay = d; return sleepContext(ctx, 0) }
 	fallback := &scriptedTranslator{identity: ProviderIdentity{Provider: "ollama", Model: "local"}}
 	var output strings.Builder
-	batch, err := (&chainTranslator{providers: []Translator{cloud, fallback}, output: &output}).Translate(context.Background(), nil)
+	batch, err := (&chainTranslator{providers: []Translator{cloud, fallback}, output: &output}).Translate(context.Background(), []TranslationRequest{{ID: "a", Source: "x"}})
 	if err != nil || batch.Identity.Provider != "ollama" || delay != maxServerRetryDelay || fallback.calls != 1 {
 		t.Fatalf("batch=%#v delay=%v fallback calls=%d error=%v", batch, delay, fallback.calls, err)
 	}
@@ -692,13 +692,13 @@ func TestChainAdvancesPermanentlyOnlyForQuota(t *testing.T) {
 	}
 	fatal := &scriptedTranslator{errors: []error{errors.New("not a provider error")}}
 	unused := &scriptedTranslator{}
-	_, err := (&chainTranslator{providers: []Translator{fatal, unused}}).Translate(context.Background(), nil)
+	_, err := (&chainTranslator{providers: []Translator{fatal, unused}}).Translate(context.Background(), []TranslationRequest{{ID: "a"}})
 	if err == nil || unused.calls != 0 {
 		t.Fatalf("fatal error=%v fallback calls=%d", err, unused.calls)
 	}
 	authNowAdvances := &scriptedTranslator{identity: geminiID, errors: []error{&ProviderError{Identity: geminiID, Kind: ErrorAuth, Reason: "bad key"}}}
 	fallback := &scriptedTranslator{identity: ProviderIdentity{Provider: "fallback", Model: "m"}}
-	batch, err := (&chainTranslator{providers: []Translator{authNowAdvances, fallback}}).Translate(context.Background(), nil)
+	batch, err := (&chainTranslator{providers: []Translator{authNowAdvances, fallback}}).Translate(context.Background(), []TranslationRequest{{ID: "a"}})
 	if err != nil || fallback.calls != 1 || batch.Identity.Provider != "fallback" {
 		t.Fatalf("batch=%#v error=%v fallback=%d", batch, err, fallback.calls)
 	}
@@ -717,5 +717,227 @@ func TestChainPlansWithCurrentlyActiveProvider(t *testing.T) {
 	plans, err = chain.Plan(requests)
 	if err != nil || len(plans) != 1 || len(plans[0]) != 3 {
 		t.Fatalf("second plans=%#v error=%v", plans, err)
+	}
+}
+
+type planningTranslator struct {
+	identity   ProviderIdentity
+	maxEntries int
+	calls      [][]string
+	plan       func([]TranslationRequest) ([][]TranslationRequest, error)
+	translate  func(int, []TranslationRequest) (TranslationBatch, error)
+}
+
+func (p *planningTranslator) ProviderIdentity() ProviderIdentity { return p.identity }
+
+func (p *planningTranslator) Plan(requests []TranslationRequest) ([][]TranslationRequest, error) {
+	if p.plan != nil {
+		return p.plan(requests)
+	}
+	maxEntries := p.maxEntries
+	if maxEntries <= 0 {
+		maxEntries = len(requests)
+	}
+	var plans [][]TranslationRequest
+	for start := 0; start < len(requests); start += maxEntries {
+		end := start + maxEntries
+		if end > len(requests) {
+			end = len(requests)
+		}
+		plans = append(plans, append([]TranslationRequest(nil), requests[start:end]...))
+	}
+	return plans, nil
+}
+
+func (p *planningTranslator) Translate(_ context.Context, requests []TranslationRequest) (TranslationBatch, error) {
+	ids := make([]string, len(requests))
+	for i, request := range requests {
+		ids[i] = request.ID
+	}
+	p.calls = append(p.calls, ids)
+	if p.translate != nil {
+		return p.translate(len(p.calls), requests)
+	}
+	return TranslationBatch{Results: validTranslationResults(requests), Identity: p.identity}, nil
+}
+
+func requestsWithIDs(ids ...string) []TranslationRequest {
+	requests := make([]TranslationRequest, len(ids))
+	for i, id := range ids {
+		requests[i] = TranslationRequest{ID: id, Source: "source-" + id}
+	}
+	return requests
+}
+
+func quotaError(identity ProviderIdentity) error {
+	return &ProviderError{Identity: identity, Kind: ErrorQuota, Reason: "quota"}
+}
+
+func TestChainReplansFallbackAndReassemblesOriginalOrder(t *testing.T) {
+	primaryID := ProviderIdentity{Provider: "primary", Model: "large"}
+	primary := &planningTranslator{identity: primaryID, maxEntries: 4, translate: func(_ int, _ []TranslationRequest) (TranslationBatch, error) {
+		return TranslationBatch{}, quotaError(primaryID)
+	}}
+	fallback := &planningTranslator{identity: ProviderIdentity{Provider: "fallback", Model: "small"}, maxEntries: 2, translate: func(_ int, requests []TranslationRequest) (TranslationBatch, error) {
+		results := validTranslationResults(requests)
+		for left, right := 0, len(results)-1; left < right; left, right = left+1, right-1 {
+			results[left], results[right] = results[right], results[left]
+		}
+		return TranslationBatch{Results: results}, nil
+	}}
+	batch, err := (&chainTranslator{providers: []Translator{primary, fallback}, output: io.Discard}).Translate(context.Background(), requestsWithIDs("a", "b", "c", "d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(primary.calls); got != "[[a b c d]]" {
+		t.Fatalf("primary calls=%s", got)
+	}
+	if got := fmt.Sprint(fallback.calls); got != "[[a b] [c d]]" {
+		t.Fatalf("fallback calls=%s", got)
+	}
+	for i, id := range []string{"a", "b", "c", "d"} {
+		if batch.Results[i].ID != id || batch.Results[i].Identity != fallback.identity {
+			t.Fatalf("result %d=%#v", i, batch.Results[i])
+		}
+	}
+}
+
+func TestChainPreservesCompletedChildrenAcrossTransitions(t *testing.T) {
+	firstID := ProviderIdentity{Provider: "first", Model: "m1"}
+	secondID := ProviderIdentity{Provider: "second", Model: "m2"}
+	first := &planningTranslator{identity: firstID, maxEntries: 2, translate: func(call int, requests []TranslationRequest) (TranslationBatch, error) {
+		if call == 2 {
+			return TranslationBatch{}, quotaError(firstID)
+		}
+		return TranslationBatch{Results: validTranslationResults(requests)}, nil
+	}}
+	second := &planningTranslator{identity: secondID, maxEntries: 1}
+	chain := &chainTranslator{providers: []Translator{first, second}, output: io.Discard}
+	batch, err := chain.Translate(context.Background(), requestsWithIDs("a", "b", "c", "d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(first.calls); got != "[[a b] [c d]]" {
+		t.Fatalf("first calls=%s", got)
+	}
+	if got := fmt.Sprint(second.calls); got != "[[c] [d]]" {
+		t.Fatalf("second calls=%s", got)
+	}
+	if batch.Results[0].Identity != firstID || batch.Results[1].Identity != firstID || batch.Results[2].Identity != secondID || batch.Results[3].Identity != secondID {
+		t.Fatalf("provenance=%#v", batch.Results)
+	}
+	_, err = chain.Translate(context.Background(), requestsWithIDs("e"))
+	got := fmt.Sprint(second.calls)
+	if err != nil || len(first.calls) != 2 || got != "[[c] [d] [e]]" {
+		t.Fatalf("permanent advancement first=%v second=%s error=%v", first.calls, got, err)
+	}
+}
+
+func TestChainRejectsCorruptChildResults(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		results []TranslationResult
+		want    string
+	}{
+		{name: "unknown", results: []TranslationResult{{ID: "a"}, {ID: "z"}}, want: "unknown"},
+		{name: "duplicate", results: []TranslationResult{{ID: "a"}, {ID: "a"}}, want: "duplicate"},
+		{name: "missing", results: []TranslationResult{{ID: "a"}}, want: "received 1 results"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &planningTranslator{identity: ProviderIdentity{Provider: "p", Model: "m"}, translate: func(_ int, _ []TranslationRequest) (TranslationBatch, error) {
+				return TranslationBatch{Results: tt.results}, nil
+			}}
+			_, err := (&chainTranslator{providers: []Translator{provider}, output: io.Discard}).Translate(context.Background(), requestsWithIDs("a", "b"))
+			var invalid interface{ InvalidResponse() }
+			if !errors.As(err, &invalid) || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestResultJSONOmitsIdentity(t *testing.T) {
+	result := TranslationResult{ID: "a", Translated: "b", Identity: ProviderIdentity{Provider: "secret-provider", Model: "secret-model"}}
+	encoded, err := json.Marshal(result)
+	if err != nil || string(encoded) != `{"id":"a","translated":"b"}` {
+		t.Fatalf("json=%s error=%v", encoded, err)
+	}
+	var decoded TranslationResult
+	if err := decodeStrictJSON([]byte(`{"id":"a","translated":"b"}`), &decoded); err != nil || decoded.Identity != (ProviderIdentity{}) {
+		t.Fatalf("decoded=%#v error=%v", decoded, err)
+	}
+	if err := decodeStrictJSON([]byte(`{"id":"a","translated":"b","identity":{}}`), &decoded); err == nil {
+		t.Fatal("identity unexpectedly accepted on the wire")
+	}
+	schema := translationSchemaFor(1, true)
+	results := schema["properties"].(map[string]any)["results"].(map[string]any)
+	properties := results["items"].(map[string]any)["properties"].(map[string]any)
+	if len(properties) != 2 || properties["id"] == nil || properties["translated"] == nil || properties["identity"] != nil {
+		t.Fatalf("wire schema properties=%#v", properties)
+	}
+}
+
+func TestChainRejectsInvalidProviderPlans(t *testing.T) {
+	requests := requestsWithIDs("a", "b")
+	for _, tt := range []struct {
+		name  string
+		plans [][]TranslationRequest
+	}{
+		{name: "empty child", plans: [][]TranslationRequest{{}}},
+		{name: "missing request", plans: [][]TranslationRequest{{requests[0]}}},
+		{name: "reordered", plans: [][]TranslationRequest{{requests[1], requests[0]}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &planningTranslator{plan: func([]TranslationRequest) ([][]TranslationRequest, error) { return tt.plans, nil }}
+			_, err := (&chainTranslator{providers: []Translator{provider}, output: io.Discard}).Translate(context.Background(), requests)
+			if err == nil || len(provider.calls) != 0 {
+				t.Fatalf("calls=%v error=%v", provider.calls, err)
+			}
+		})
+	}
+}
+
+func TestChainExhaustionAndCancellationDoNotResubmitCompletedIDs(t *testing.T) {
+	firstID := ProviderIdentity{Provider: "first", Model: "m1"}
+	secondID := ProviderIdentity{Provider: "second", Model: "m2"}
+	first := &planningTranslator{identity: firstID, maxEntries: 1, translate: func(call int, requests []TranslationRequest) (TranslationBatch, error) {
+		if call == 2 {
+			return TranslationBatch{}, quotaError(firstID)
+		}
+		return TranslationBatch{Results: validTranslationResults(requests)}, nil
+	}}
+	second := &planningTranslator{identity: secondID, maxEntries: 1, translate: func(_ int, _ []TranslationRequest) (TranslationBatch, error) {
+		return TranslationBatch{}, quotaError(secondID)
+	}}
+	batch, err := (&chainTranslator{providers: []Translator{first, second}, output: io.Discard}).Translate(context.Background(), requestsWithIDs("a", "b"))
+	var providerErr *ProviderError
+	if !errors.As(err, &providerErr) || len(batch.Results) != 1 || batch.Results[0].ID != "a" || batch.Results[0].Identity != firstID || fmt.Sprint(first.calls) != "[[a] [b]]" || fmt.Sprint(second.calls) != "[[b]]" {
+		t.Fatalf("batch=%#v first=%v second=%v error=%v", batch, first.calls, second.calls, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelling := &planningTranslator{identity: firstID, maxEntries: 1, translate: func(_ int, requests []TranslationRequest) (TranslationBatch, error) {
+		cancel()
+		return TranslationBatch{Results: validTranslationResults(requests)}, nil
+	}}
+	unused := &planningTranslator{identity: secondID}
+	_, err = (&chainTranslator{providers: []Translator{cancelling, unused}, output: io.Discard}).Translate(ctx, requestsWithIDs("a", "b"))
+	if !errors.Is(err, context.Canceled) || fmt.Sprint(cancelling.calls) != "[[a]]" || len(unused.calls) != 0 {
+		t.Fatalf("cancelling=%v unused=%v error=%v", cancelling.calls, unused.calls, err)
+	}
+}
+
+func TestChainReturnsCompletedResultsWithLaterInvalidError(t *testing.T) {
+	identity := ProviderIdentity{Provider: "provider", Model: "model"}
+	provider := &planningTranslator{identity: identity, maxEntries: 1, translate: func(call int, requests []TranslationRequest) (TranslationBatch, error) {
+		if call == 2 {
+			return TranslationBatch{Identity: identity}, &invalidTranslationResponseError{err: errors.New("invalid child")}
+		}
+		return TranslationBatch{Results: validTranslationResults(requests), Identity: identity}, nil
+	}}
+	batch, err := (&chainTranslator{providers: []Translator{provider}, output: io.Discard}).Translate(context.Background(), requestsWithIDs("a", "b"))
+	var invalid interface{ InvalidResponse() }
+	if !errors.As(err, &invalid) || len(batch.Results) != 1 || batch.Results[0].ID != "a" || batch.Results[0].Identity != identity {
+		t.Fatalf("batch=%#v error=%v", batch, err)
 	}
 }
