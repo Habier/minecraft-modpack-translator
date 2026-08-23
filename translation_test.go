@@ -212,6 +212,9 @@ func TestTranslateWorkspaceOrdersContextAndKeepsCatalogOutputOrder(t *testing.T)
 			t.Fatalf("request order=%#v want=%#v", requests, wantIDs)
 		}
 	}
+	if requests[3].SourceFile != "assets/beta/lang/shared.json" {
+		t.Fatalf("normalized source file=%q", requests[3].SourceFile)
+	}
 	if requests[len(requests)-1].SourceFile != "assets/zeta/lang/z.json" {
 		t.Fatalf("duplicate representative=%#v", requests[len(requests)-1])
 	}
@@ -226,6 +229,19 @@ func TestTranslateWorkspaceOrdersContextAndKeepsCatalogOutputOrder(t *testing.T)
 	}
 	if cache.Entries[0].Translation != cache.Entries[3].Translation {
 		t.Fatalf("duplicate fan-out=%#v", cache.Entries)
+	}
+}
+
+func TestNormalizeSourceFileTreatsSlashStylesIdentically(t *testing.T) {
+	inputs := []string{
+		"assets/beta/lang/shared.json",
+		`assets\beta\lang\shared.json`,
+		`assets/beta\lang/./shared.json`,
+	}
+	for _, input := range inputs {
+		if got := normalizeSourceFile(input); got != "assets/beta/lang/shared.json" {
+			t.Errorf("normalizeSourceFile(%q) = %q", input, got)
+		}
 	}
 }
 

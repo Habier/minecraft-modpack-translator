@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -155,8 +156,8 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 		if leftMod != rightMod {
 			return leftMod < rightMod
 		}
-		leftFile := filepath.ToSlash(filepath.Clean(representatives[i].entry.SourceFile))
-		rightFile := filepath.ToSlash(filepath.Clean(representatives[j].entry.SourceFile))
+		leftFile := normalizeSourceFile(representatives[i].entry.SourceFile)
+		rightFile := normalizeSourceFile(representatives[j].entry.SourceFile)
 		return leftFile < rightFile
 	})
 	fmt.Printf("Translation progress: total=%d cached=%d translated=0 remaining=%d\n", len(prepared), cachedCount, len(prepared)-cachedCount)
@@ -267,7 +268,7 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 	orderedRequests := make([]TranslationRequest, 0, len(representatives))
 	orderedByID := make(map[string]preparedTranslation, len(representatives))
 	for _, item := range representatives {
-		request := TranslationRequest{ID: item.entry.ID, Source: item.protected.Protected, SourceKind: item.entry.SourceKind, SourceFile: filepath.ToSlash(item.entry.SourceFile), TargetLocale: catalog.TargetLocale}
+		request := TranslationRequest{ID: item.entry.ID, Source: item.protected.Protected, SourceKind: item.entry.SourceKind, SourceFile: normalizeSourceFile(item.entry.SourceFile), TargetLocale: catalog.TargetLocale}
 		orderedRequests = append(orderedRequests, request)
 		orderedByID[request.ID] = item
 	}
@@ -317,8 +318,12 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 	return nil
 }
 
+func normalizeSourceFile(sourceFile string) string {
+	return path.Clean(strings.ReplaceAll(sourceFile, `\`, "/"))
+}
+
 func catalogModIdentity(entry CatalogEntryV1) string {
-	parts := strings.Split(filepath.ToSlash(filepath.Clean(entry.SourceFile)), "/")
+	parts := strings.Split(normalizeSourceFile(entry.SourceFile), "/")
 	switch {
 	case len(parts) >= 2 && parts[0] == "assets":
 		return "namespace:" + parts[1]
