@@ -69,7 +69,7 @@ func runTranslation(options cliOptions, limits languageLimits) (err error) {
 	if err != nil {
 		return err
 	}
-	targetLocale, err := selectTargetLocale(os.Stdin, os.Stdout, os.Getenv)
+	targetLocale, err := selectTargetLocale(os.Stdin, os.Stdout, os.Getenv, detectSystemLocale)
 	if err != nil {
 		return err
 	}
