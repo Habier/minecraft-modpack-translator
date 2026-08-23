@@ -16,8 +16,9 @@ import (
 
 func TestProviderProfilesFromEnvDefaultChainUsesOllamaOnly(t *testing.T) {
 	env := providerChainEnv("")
+	delete(env, "PROVIDER_OLLAMA_MODE")
 	profiles, err := providerProfilesFromEnv(func(name string) string { return env[name] })
-	if err != nil || len(profiles) != 1 || profiles[0].Name != "ollama" || profiles[0].BaseURL.String() != "http://localhost:11434/v1" {
+	if err != nil || len(profiles) != 1 || profiles[0].Name != "ollama" || profiles[0].BaseURL.String() != "http://localhost:11434/v1" || profiles[0].Mode != modeJSONSchema {
 		t.Fatalf("profiles=%#v error=%v", profiles, err)
 	}
 	translator, model, err := buildTranslatorChain(func(name string) string { return env[name] })
@@ -50,6 +51,34 @@ func TestProviderProfilesFromEnvCustomProviderParsing(t *testing.T) {
 	}
 	if profiles[1].Name != "together-ai" || profiles[1].Mode != modeJSONObject {
 		t.Fatalf("together profile=%#v", profiles[1])
+	}
+}
+
+func TestParseProviderMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    capabilityMode
+		wantErr string
+	}{
+		{name: "unset defaults to JSON Schema", want: modeJSONSchema},
+		{name: "explicit JSON Schema", value: "json_schema", want: modeJSONSchema},
+		{name: "explicit JSON object", value: "json_object", want: modeJSONObject},
+		{name: "invalid mode", value: "text", wantErr: "PROVIDER_TEST_MODE must be one of: json_schema, json_object"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseProviderMode(tt.value, "PROVIDER_TEST_MODE", "test")
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("error=%v want=%q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("mode=%q want=%q error=%v", got, tt.want, err)
+			}
+		})
 	}
 }
 
@@ -156,7 +185,6 @@ func TestProviderProfilesFromEnvMissingRequiredFields(t *testing.T) {
 		{"base URL", "PROVIDER_DEEPINFRA_BASE_URL", "PROVIDER_DEEPINFRA_BASE_URL"},
 		{"API key", "PROVIDER_DEEPINFRA_API_KEY", "PROVIDER_DEEPINFRA_API_KEY"},
 		{"model", "PROVIDER_DEEPINFRA_MODEL", "PROVIDER_DEEPINFRA_MODEL"},
-		{"mode", "PROVIDER_DEEPINFRA_MODE", "PROVIDER_DEEPINFRA_MODE"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -225,6 +253,8 @@ func TestBuildTranslatorChainIncludesOllamaOnlyWhenPresent(t *testing.T) {
 
 func TestProviderChainSummaryIsOrderedAndSecretFree(t *testing.T) {
 	env := providerChainEnv("deepinfra,together,ollama")
+	delete(env, "PROVIDER_DEEPINFRA_MODE")
+	delete(env, "PROVIDER_OLLAMA_MODE")
 	delete(env, "PROVIDER_TOGETHER_MODEL")
 	env["PROVIDER_OLLAMA_MODEL"] = "local-model"
 	summary := providerChainSummary(func(name string) string { return env[name] })
@@ -367,7 +397,7 @@ func TestOllamaConfigValidation(t *testing.T) {
 		t.Fatalf("profile=%#v error=%v", profile, err)
 	}
 
-	for _, missing := range []string{"PROVIDER_OLLAMA_BASE_URL", "PROVIDER_OLLAMA_MODEL", "PROVIDER_OLLAMA_TIMEOUT", "PROVIDER_OLLAMA_MODE"} {
+	for _, missing := range []string{"PROVIDER_OLLAMA_BASE_URL", "PROVIDER_OLLAMA_MODEL", "PROVIDER_OLLAMA_TIMEOUT"} {
 		t.Run("missing "+missing, func(t *testing.T) {
 			env := providerChainEnv("")
 			delete(env, missing)

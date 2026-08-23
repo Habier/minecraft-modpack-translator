@@ -241,7 +241,7 @@ func parseProviderMode(value, envName, providerName string) (capabilityMode, err
 	case modeJSONObject:
 		return modeJSONObject, nil
 	case "":
-		return "", fmt.Errorf("%s is required for provider %s", envName, providerName)
+		return modeJSONSchema, nil
 	default:
 		return "", fmt.Errorf("%s must be one of: %s, %s", envName, modeJSONSchema, modeJSONObject)
 	}
@@ -858,6 +858,7 @@ func providerChainSummary(getenv func(string) string) string {
 		baseEnv, keyEnv, modelEnv, modeEnv := providerEnvNames(prefix)
 		timeoutEnv := prefix + "TIMEOUT"
 		base, key, model, mode, timeout := strings.TrimSpace(getenv(baseEnv)), strings.TrimSpace(getenv(keyEnv)), strings.TrimSpace(getenv(modelEnv)), strings.TrimSpace(getenv(modeEnv)), strings.TrimSpace(getenv(timeoutEnv))
+		parsedMode, modeErr := parseProviderMode(mode, modeEnv, entry.name)
 		suffix := ""
 		if i == len(entries)-1 && entry.name == "ollama" {
 			suffix = " (final fallback)"
@@ -869,17 +870,17 @@ func providerChainSummary(getenv func(string) string) string {
 			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)%s", entry.name, keyEnv, suffix))
 		case model == "":
 			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)%s", entry.name, modelEnv, suffix))
-		case mode == "":
-			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)%s", entry.name, modeEnv, suffix))
 		case entry.capabilities.timeoutRequired && timeout == "":
 			lines = append(lines, fmt.Sprintf("  %s: disabled (%s not set)%s", entry.name, timeoutEnv, suffix))
+		case modeErr != nil:
+			lines = append(lines, fmt.Sprintf("  %s: invalid (%s)%s", entry.name, modeErr, suffix))
 		default:
 			limits, err := providerLimitsFromEnv(prefix, getenv)
 			if err != nil {
 				lines = append(lines, fmt.Sprintf("  %s: invalid (%s)%s", entry.name, err, suffix))
 				continue
 			}
-			lines = append(lines, fmt.Sprintf("  %s: enabled model=%s mode=%s limits=context_tokens:%d,max_output_tokens:%d,max_request_bytes:%d,max_entries:%d%s", entry.name, model, mode, limits.ContextTokens, limits.MaxOutputTokens, limits.MaxRequestBytes, limits.MaxEntries, suffix))
+			lines = append(lines, fmt.Sprintf("  %s: enabled model=%s mode=%s limits=context_tokens:%d,max_output_tokens:%d,max_request_bytes:%d,max_entries:%d%s", entry.name, model, parsedMode, limits.ContextTokens, limits.MaxOutputTokens, limits.MaxRequestBytes, limits.MaxEntries, suffix))
 		}
 	}
 	return strings.Join(lines, "\n")
