@@ -76,36 +76,21 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
-func TestRestoreAllowsSafeReordering(t *testing.T) {
-	protected, err := tokenprotect.Protect("First %1$s then %2$d using {item} and mod:path")
-	if err != nil {
-		t.Fatal(err)
-	}
-	markers := strings.Fields(protected.Protected)
-	translated := "Segundo " + markers[3] + " primero " + markers[1] + " recurso " + markers[7] + " variable " + markers[5]
-	got, err := protected.Restore(translated)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "Segundo %2$d primero %1$s recurso mod:path variable {item}" {
-		t.Fatalf("Restore() = %q", got)
-	}
-}
-
-func TestRestoreRejectsInvalidMarkers(t *testing.T) {
+func TestRestoreRejectsInvalidPlaceholders(t *testing.T) {
 	protected, err := tokenprotect.Protect("Value %s and {name}")
 	if err != nil {
 		t.Fatal(err)
 	}
-	fields := strings.Fields(protected.Protected)
-	first, second := fields[1], fields[3]
+	first, second := `<keep id="0"/>`, `<keep id="1"/>`
 	tests := []struct {
 		name, translated, problem string
 	}{
-		{"missing", "Valor " + first, "missing marker"},
-		{"duplicated", "Valor " + first + " " + first + " " + second, "duplicated marker"},
-		{"unknown", "Valor " + first + " " + strings.Replace(second, "000001", "999999", 1), "unknown marker"},
-		{"altered", "Valor " + first + " " + strings.TrimSuffix(second, "__") + "_", "malformed marker"},
+		{"missing", "Valor " + first, "missing placeholder"},
+		{"duplicated", "Valor " + first + " " + first + " " + second, "duplicated placeholder"},
+		{"unknown", "Valor " + first + ` <keep id="999"/>`, "unknown placeholder"},
+		{"malformed", "Valor " + first + ` <keep id="1">`, "malformed placeholder"},
+		{"escaped", "Valor " + first + ` &lt;keep id="1"/&gt;`, "escaped placeholder"},
+		{"reordered", "Valor " + second + " " + first, "placeholders were reordered"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -121,16 +106,27 @@ func TestRestoreRejectsInvalidMarkers(t *testing.T) {
 	}
 }
 
-func TestRestoreOrderPolicy(t *testing.T) {
+func TestRestoreIgnoresBenignPlaceholderTagPrefixes(t *testing.T) {
 	tests := []struct {
-		name, source string
-		wantError    bool
+		name   string
+		source string
+		prefix func(string) string
 	}{
-		{"unindexed printf order required", "%s then %d", true},
-		{"indexed printf order movable", "%1$s then %2$d", false},
-		{"Patchouli macro order required", "$(l:mod:page)link$()", true},
-		{"Minecraft formatting order required", "§aColor §lbold", true},
-		{"ampersand Minecraft formatting order required", "&l&o&cNO ORE&r", true},
+		{
+			name:   "default tag raw and escaped prefixes",
+			source: "Value %s",
+			prefix: func(string) string { return `<keeper>safe</keeper> &lt;keepalive <keep id="0"/>` },
+		},
+		{
+			name:   "scoped tag raw and escaped prefixes",
+			source: `Literal <keep id="9"/> and %s`,
+			prefix: func(protected string) string {
+				start := strings.Index(protected, "<keep-")
+				end := strings.Index(protected[start:], " ")
+				tag := protected[start+1 : start+end]
+				return "<" + tag + `alive>safe</` + tag + `alive> &lt;` + tag + `keeper ` + protected[start:start+strings.Index(protected[start:], ">")+1]
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -138,11 +134,9 @@ func TestRestoreOrderPolicy(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			fields := strings.Fields(protected.Protected)
-			translated := fields[len(fields)-1] + " translated " + fields[0]
-			_, err = protected.Restore(translated)
-			if (err != nil) != tt.wantError {
-				t.Fatalf("Restore() error = %v, wantError %v", err, tt.wantError)
+			translated := tt.prefix(protected.Protected)
+			if _, err := protected.Restore(translated); err != nil {
+				t.Fatalf("Restore(%q) rejected benign tag prefix text: %v", translated, err)
 			}
 		})
 	}
@@ -153,22 +147,24 @@ func TestRepeatedIdenticalTokensHaveDistinctMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fields := strings.Fields(protected.Protected)
-	if fields[0] == fields[2] {
+	first, second := `<keep id="0"/>`, `<keep id="1"/>`
+	if !strings.Contains(protected.Protected, first) || !strings.Contains(protected.Protected, second) {
 		t.Fatal("repeated occurrences must have distinct markers")
 	}
-	if _, err := protected.Restore(fields[2] + " y " + fields[0]); err != nil {
-		t.Fatalf("indexed repeated placeholders may move: %v", err)
+	if _, err := protected.Restore(second + " y " + first); err == nil {
+		t.Fatal("repeated placeholders must retain relative order")
 	}
 }
 
-func TestMarkerPrefixIsDeterministicAndAvoidsSourceCollision(t *testing.T) {
+func TestPlaceholderTagIsShortAndAvoidsSourceCollision(t *testing.T) {
 	base, err := tokenprotect.Protect("Hello %s")
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefix := strings.TrimSuffix(base.Protected[len("Hello "):], "000000__")
-	source := "Marker-like prose __MPT_not_a_marker_ and collision " + prefix + "000000__ %s"
+	if base.Protected != `Hello <keep id="0"/>` {
+		t.Fatalf("default protected payload = %q", base.Protected)
+	}
+	source := `Existing <keep id="0"/> and &lt;keep id="1"/&gt; remain literal beside %s`
 	one, err := tokenprotect.Protect(source)
 	if err != nil {
 		t.Fatal(err)
@@ -180,8 +176,8 @@ func TestMarkerPrefixIsDeterministicAndAvoidsSourceCollision(t *testing.T) {
 	if one.Protected != two.Protected {
 		t.Fatal("marker derivation is not deterministic")
 	}
-	if strings.Count(one.Protected, prefix) != 1 {
-		t.Fatal("source collision text should remain prose and not be reused as a marker prefix")
+	if !strings.Contains(one.Protected, `<keep id="0"/>`) || !strings.Contains(one.Protected, `&lt;keep id="1"/&gt;`) || !strings.Contains(one.Protected, `<keep-`) {
+		t.Fatalf("source collision was not isolated with a scoped tag: %q", one.Protected)
 	}
 	if got, err := one.Restore(one.Protected); err != nil || got != source {
 		t.Fatalf("collision round trip = %q, %v", got, err)

@@ -31,14 +31,13 @@ type Token struct {
 
 type protectedToken struct {
 	Token
-	marker       string
-	orderedGroup string
+	marker string
 }
 
 // Text is a protected translation payload and retains the data needed to restore it.
 type Text struct {
 	Protected string
-	prefix    string
+	tag       string
 	tokens    []protectedToken
 }
 
@@ -80,11 +79,11 @@ func Find(source string) []Token {
 	return tokens
 }
 
-// Protect replaces tokens with deterministic opaque markers. The marker prefix is
-// derived from the complete source and re-derived if it collides with source text.
+// Protect replaces tokens with short XML-style placeholders. A scoped tag is
+// derived from the complete source when the default tag would collide with it.
 func Protect(source string) (*Text, error) {
 	tokens := Find(source)
-	prefix, err := markerPrefix(source)
+	tag, err := placeholderTag(source)
 	if err != nil {
 		return nil, err
 	}
@@ -94,18 +93,17 @@ func Protect(source string) (*Text, error) {
 	protected := make([]protectedToken, 0, len(tokens))
 	last := 0
 	for i, token := range tokens {
-		marker := fmt.Sprintf("%s%06d__", prefix, i)
+		marker := fmt.Sprintf(`<%s id="%d"/>`, tag, i)
 		out.WriteString(source[last:token.Start])
 		out.WriteString(marker)
 		protected = append(protected, protectedToken{
-			Token:        token,
-			marker:       marker,
-			orderedGroup: orderGroup(token),
+			Token:  token,
+			marker: marker,
 		})
 		last = token.End
 	}
 	out.WriteString(source[last:])
-	return &Text{Protected: out.String(), prefix: prefix, tokens: protected}, nil
+	return &Text{Protected: out.String(), tag: tag, tokens: protected}, nil
 }
 
 // Tokens returns a copy of the protected source token metadata.
@@ -117,8 +115,8 @@ func (t *Text) Tokens() []Token {
 	return result
 }
 
-// Restore validates marker identity, count, syntax, and required ordering before
-// restoring the exact source tokens. Provider output may otherwise move markers.
+// Restore validates placeholder identity, count, syntax, and relative ordering
+// before restoring the exact source tokens.
 func (t *Text) Restore(translated string) (string, error) {
 	seen := make([]bool, len(t.tokens))
 	positions := make([]int, len(t.tokens))
@@ -134,47 +132,54 @@ func (t *Text) Restore(translated string) (string, error) {
 		positions[i] = -1
 	}
 
+	rawStart := "<" + t.tag
+	escapedStart := "&lt;" + t.tag
 	for at := 0; ; {
-		rel := strings.Index(translated[at:], t.prefix)
-		if rel < 0 {
+		rawRel := exactTagStart(translated[at:], rawStart)
+		escapedRel := exactTagStart(translated[at:], escapedStart)
+		if rawRel < 0 && escapedRel < 0 {
 			break
 		}
-		start := at + rel
-		end := start + len(t.prefix)
+		if escapedRel >= 0 && (rawRel < 0 || escapedRel < rawRel) {
+			start := at + escapedRel
+			return "", &Error{Problem: "escaped placeholder", Marker: safePlaceholder(translated[start:]), Offset: start}
+		}
+		start := at + rawRel
+		end := start + len(rawStart)
+		if end >= len(translated) || translated[end] != ' ' || !strings.HasPrefix(translated[end:], ` id="`) {
+			return "", &Error{Problem: "malformed placeholder", Marker: safePlaceholder(translated[start:]), Offset: start}
+		}
+		end += len(` id="`)
+		digitStart := end
 		for end < len(translated) && translated[end] >= '0' && translated[end] <= '9' {
 			end++
 		}
-		if end == start+len(t.prefix) || end+2 > len(translated) || translated[end:end+2] != "__" {
-			return "", &Error{Problem: "malformed marker", Marker: safeMarker(translated[start:], t.prefix), Offset: start}
+		if end == digitStart || end+3 > len(translated) || translated[end:end+3] != `"/>` {
+			return "", &Error{Problem: "malformed placeholder", Marker: safePlaceholder(translated[start:]), Offset: start}
 		}
-		marker := translated[start : end+2]
+		marker := translated[start : end+3]
 		index, known := byMarker[marker]
 		if !known {
-			return "", &Error{Problem: "unknown marker", Marker: marker, Offset: start}
+			return "", &Error{Problem: "unknown placeholder", Marker: marker, Offset: start}
 		}
 		if seen[index] {
-			return "", &Error{Problem: "duplicated marker", Marker: marker, Offset: start}
+			return "", &Error{Problem: "duplicated placeholder", Marker: marker, Offset: start}
 		}
 		seen[index] = true
 		positions[index] = start
-		occurrences = append(occurrences, occurrence{start: start, end: end + 2, index: index})
-		at = end + 2
+		occurrences = append(occurrences, occurrence{start: start, end: end + 3, index: index})
+		at = end + 3
 	}
 
 	for i, ok := range seen {
 		if !ok {
-			return "", &Error{Problem: "missing marker", Marker: t.tokens[i].marker, Offset: -1}
+			return "", &Error{Problem: "missing placeholder", Marker: t.tokens[i].marker, Offset: -1}
 		}
 	}
-	lastByGroup := map[string]int{}
-	for i, token := range t.tokens {
-		if token.orderedGroup == "" {
-			continue
+	for i := 1; i < len(t.tokens); i++ {
+		if positions[i] < positions[i-1] {
+			return "", &Error{Problem: "placeholders were reordered", Marker: t.tokens[i].marker, Offset: positions[i]}
 		}
-		if previous, ok := lastByGroup[token.orderedGroup]; ok && positions[i] < previous {
-			return "", &Error{Problem: token.orderedGroup + " markers were reordered", Marker: token.marker, Offset: positions[i]}
-		}
-		lastByGroup[token.orderedGroup] = positions[i]
 	}
 
 	var result strings.Builder
@@ -189,36 +194,53 @@ func (t *Text) Restore(translated string) (string, error) {
 	return result.String(), nil
 }
 
-func markerPrefix(source string) (string, error) {
+func placeholderTag(source string) (string, error) {
+	if !placeholderTagCollides(source, "keep") {
+		return "keep", nil
+	}
 	for nonce := 0; nonce < 256; nonce++ {
 		digest := sha256.Sum256([]byte(fmt.Sprintf("tokenprotect:%d:%s", nonce, source)))
-		prefix := fmt.Sprintf("__MPT_%x_", digest[:8])
-		if !strings.Contains(source, prefix) {
-			return prefix, nil
+		tag := fmt.Sprintf("keep-%x", digest[:4])
+		if !placeholderTagCollides(source, tag) {
+			return tag, nil
 		}
 	}
-	return "", &Error{Problem: "could not derive a collision-free marker prefix", Offset: -1}
+	return "", &Error{Problem: "could not derive a collision-free placeholder tag", Offset: -1}
 }
 
-func safeMarker(value, prefix string) string {
-	end := len(prefix)
-	for end < len(value) && end < len(prefix)+24 && value[end] > ' ' {
+func placeholderTagCollides(source, tag string) bool {
+	return exactTagStart(source, "<"+tag) >= 0 || exactTagStart(source, "&lt;"+tag) >= 0
+}
+
+func exactTagStart(value, start string) int {
+	for offset := 0; offset < len(value); {
+		rel := strings.Index(value[offset:], start)
+		if rel < 0 {
+			return -1
+		}
+		at := offset + rel
+		after := at + len(start)
+		if after == len(value) || !isXMLNameByte(value[after]) {
+			return at
+		}
+		offset = after
+	}
+	return -1
+}
+
+func isXMLNameByte(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || strings.ContainsRune("_.:-", rune(value))
+}
+
+func safePlaceholder(value string) string {
+	end := 0
+	for end < len(value) && end < 64 && value[end] != '>' && value[end] != '\n' && value[end] != '\r' {
+		end++
+	}
+	if end < len(value) && value[end] == '>' {
 		end++
 	}
 	return value[:end]
-}
-
-func orderGroup(token Token) string {
-	if token.Kind == KindPatchouli {
-		return "Patchouli"
-	}
-	if token.Kind == KindPrintf && !isIndexedPrintf(token.Text) && token.Text != "%%" {
-		return "unindexed printf"
-	}
-	if token.Kind == KindFormatting {
-		return "Minecraft formatting"
-	}
-	return ""
 }
 
 func recognize(s string, i int) (int, Kind) {

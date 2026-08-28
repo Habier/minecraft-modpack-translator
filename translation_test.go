@@ -130,7 +130,7 @@ func TestTranslateWorkspaceDeduplicatesBatchesCachesAndResumes(t *testing.T) {
 	provider.calls = nil
 	provider.maxEntries = 0
 	cache = readTranslationCache(t, translationCachePath(workspace))
-	cache.PromptVersion = "en-target-minecraft-v1"
+	cache.PromptVersion = "minecraft-localization-system-user-v2"
 	data, _ := json.Marshal(cache)
 	if err := os.WriteFile(translationCachePath(workspace), data, 0644); err != nil {
 		t.Fatal(err)
@@ -142,8 +142,8 @@ func TestTranslateWorkspaceDeduplicatesBatchesCachesAndResumes(t *testing.T) {
 		t.Fatalf("prompt invalidation calls = %#v", provider.calls)
 	}
 	cache = readTranslationCache(t, translationCachePath(workspace))
-	if cache.PromptVersion != translationPromptV2 {
-		t.Fatalf("prompt version = %q, want %q", cache.PromptVersion, translationPromptV2)
+	if cache.PromptVersion != translationPromptV3 {
+		t.Fatalf("prompt version = %q, want %q", cache.PromptVersion, translationPromptV3)
 	}
 	provider.calls = nil
 	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{}); err != nil {
@@ -181,6 +181,58 @@ func TestTranslateWorkspaceUsesDeterministicContiguousProviderPlans(t *testing.T
 	secondOrder := []string{second.calls[0][0].ID, second.calls[1][0].ID, second.calls[2][0].ID}
 	if strings.Join(firstOrder, ",") != strings.Join(secondOrder, ",") {
 		t.Fatalf("nondeterministic order: %v != %v", firstOrder, secondOrder)
+	}
+}
+
+func TestTranslateWorkspaceSendsShortPlaceholdersAndRestoresTokens(t *testing.T) {
+	workspace := t.TempDir()
+	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "Hello %s and {name}", "a.json")})
+	provider := &fakeTranslator{fn: func(_ int, requests []TranslationRequest) ([]TranslationResult, error) {
+		if got := requests[0].Source; got != `Hello <keep id="0"/> and <keep id="1"/>` {
+			t.Fatalf("provider-visible source = %q", got)
+		}
+		return []TranslationResult{{ID: requests[0].ID, Translated: `Hola <keep id="0"/> y <keep id="1"/>`}}, nil
+	}}
+
+	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cache := readTranslationCache(t, translationCachePath(workspace))
+	if len(cache.Entries) != 1 || cache.Entries[0].Translation != "Hola %s y {name}" {
+		t.Fatalf("restored cache entries = %#v", cache.Entries)
+	}
+}
+
+func TestTranslateWorkspaceInvalidatesV2CacheForImmutablePlaceholderContract(t *testing.T) {
+	workspace := t.TempDir()
+	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "Hello %s", "a.json")})
+	provider := &fakeTranslator{}
+	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	cachePath := translationCachePath(workspace)
+	cache := readTranslationCache(t, cachePath)
+	cache.PromptVersion = "minecraft-localization-system-user-v2"
+	cache.Entries[0].CacheKey = sha256Hex("legacy-__MPT_marker_encoding")
+	data, err := json.Marshal(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachePath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider.calls = nil
+
+	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.calls) != 1 {
+		t.Fatalf("v2 cache was not invalidated: provider calls=%#v", provider.calls)
+	}
+	updated := readTranslationCache(t, cachePath)
+	if updated.PromptVersion != translationPromptV3 {
+		t.Fatalf("prompt version = %q, want %q", updated.PromptVersion, translationPromptV3)
 	}
 }
 
@@ -464,7 +516,7 @@ func TestTranslateWorkspaceRejectsDroppedAmpersandFormattingMarker(t *testing.T)
 	if err := json.Unmarshal(mustRead(t, partial.ReportPath), &report); err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Failures) != 1 || !strings.Contains(report.Failures[0].Reason, "missing marker") {
+	if len(report.Failures) != 1 || !strings.Contains(report.Failures[0].Reason, "missing placeholder") {
 		t.Fatalf("failure report = %#v", report.Failures)
 	}
 }
@@ -626,7 +678,7 @@ func TestTranslateWorkspaceDoesNotPublishStaleEntriesUnderNewPromptVersion(t *te
 	}
 	completedID := interrupted.calls[0][0].ID
 	published := readTranslationCache(t, cachePath)
-	if published.PromptVersion != translationPromptV2 || len(published.Entries) != 1 || published.Entries[0].ID != completedID {
+	if published.PromptVersion != translationPromptV3 || len(published.Entries) != 1 || published.Entries[0].ID != completedID {
 		t.Fatalf("incrementally published cache = %#v", published)
 	}
 

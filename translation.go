@@ -24,7 +24,7 @@ import (
 
 const (
 	translationSchema   = "modpack-translator.translations/v2"
-	translationPromptV2 = "minecraft-localization-system-user-v2"
+	translationPromptV3 = "minecraft-localization-immutable-placeholders-v3"
 	validationRetries   = 1
 	maxCatalogFileBytes = 320 << 20
 )
@@ -114,8 +114,8 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 	if err != nil {
 		return err
 	}
-	promptMatches := cache.PromptVersion == translationPromptV2
-	cache.PromptVersion = translationPromptV2
+	promptMatches := cache.PromptVersion == translationPromptV3
+	cache.PromptVersion = translationPromptV3
 	if !promptMatches {
 		cache.Entries = []TranslationCacheEntryV2{}
 	}
@@ -128,7 +128,7 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 		}
 		sourceHash := sha256Hex(entry.Source)
 		signature := tokenSignature(protected.Tokens())
-		key := strings.Join([]string{sha256Hex(protected.Protected), signature, catalog.TargetLocale, translationPromptV2}, "|")
+		key := strings.Join([]string{sha256Hex(protected.Protected), signature, catalog.TargetLocale, translationPromptV3}, "|")
 		prepared = append(prepared, preparedTranslation{entry: entry, protected: protected, key: key, sourceHash: sourceHash, tokenSignature: signature})
 	}
 
@@ -451,7 +451,7 @@ func loadCatalog(path string) (CatalogV1, error) {
 }
 
 func loadTranslationCacheV2(path, locale string) (TranslationCacheV2, error) {
-	cache := TranslationCacheV2{Schema: translationSchema, TargetLocale: locale, PromptVersion: translationPromptV2, Entries: []TranslationCacheEntryV2{}}
+	cache := TranslationCacheV2{Schema: translationSchema, TargetLocale: locale, PromptVersion: translationPromptV3, Entries: []TranslationCacheEntryV2{}}
 	data, err := readFileLimited(path, 320<<20)
 	recovered := false
 	if errors.Is(err, os.ErrNotExist) {
