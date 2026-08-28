@@ -10,9 +10,10 @@ import (
 )
 
 type localeEnv func(string) string
+type systemLocale func() string
 
-func selectTargetLocale(input io.Reader, output io.Writer, getenv localeEnv) (string, error) {
-	defaultLocale := detectDefaultTargetLocale(getenv)
+func selectTargetLocale(input io.Reader, output io.Writer, getenv localeEnv, system systemLocale) (string, error) {
+	defaultLocale := detectDefaultTargetLocale(getenv, system)
 	fmt.Fprintf(output, "Enter target language [%s]: ", defaultLocale)
 
 	reader := bufio.NewReader(input)
@@ -31,15 +32,28 @@ func selectTargetLocale(input io.Reader, output io.Writer, getenv localeEnv) (st
 	return locale, nil
 }
 
-func detectDefaultTargetLocale(getenv localeEnv) string {
-	for _, name := range []string{"LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"} {
+func detectDefaultTargetLocale(getenv localeEnv, system systemLocale) string {
+	if locale, ok := detectEnvironmentLocale(getenv, "LC_ALL", "LC_MESSAGES"); ok {
+		return locale
+	}
+	if locale, ok := normalizeMinecraftLocale(system()); ok {
+		return locale
+	}
+	if locale, ok := detectEnvironmentLocale(getenv, "LANG", "LANGUAGE"); ok {
+		return locale
+	}
+	return defaultTargetLanguageCode
+}
+
+func detectEnvironmentLocale(getenv localeEnv, names ...string) (string, bool) {
+	for _, name := range names {
 		for _, value := range strings.Split(getenv(name), ":") {
 			if locale, ok := normalizeMinecraftLocale(value); ok {
-				return locale
+				return locale, true
 			}
 		}
 	}
-	return defaultTargetLanguageCode
+	return "", false
 }
 
 func normalizeMinecraftLocale(value string) (string, bool) {
