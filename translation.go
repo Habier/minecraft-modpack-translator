@@ -9,16 +9,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
-	"time"
 	"unicode/utf8"
 
+	"modpack-translator/internal/provider"
 	"modpack-translator/tokenprotect"
 )
 
@@ -47,7 +47,9 @@ type TranslationCacheEntryV2 struct {
 	Model             string `json:"model"`
 }
 
-type translationOptions struct{}
+type translationOptions struct {
+	events provider.EventSink
+}
 
 type TranslationPartialError struct {
 	Successful int
@@ -73,23 +75,6 @@ type translationFailure struct {
 	Reason   string `json:"reason"`
 }
 
-var (
-	translationLogMu sync.Mutex
-)
-
-func appendTranslationLog(format string, args ...any) {
-	path := "translation.log"
-	translationLogMu.Lock()
-	defer translationLogMu.Unlock()
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(f, "[%s] %s\n", time.Now().UTC().Format(time.RFC3339), msg)
-}
-
 type preparedTranslation struct {
 	entry          CatalogEntryV1
 	protected      *tokenprotect.Text
@@ -104,7 +89,11 @@ type validatedTranslation struct {
 }
 
 func translateWorkspace(ctx context.Context, workspace string, translator Translator, options translationOptions) error {
-	_ = options
+	event := func(name string, attrs ...slog.Attr) {
+		if options.events != nil {
+			options.events.Event(ctx, name, attrs...)
+		}
+	}
 	catalog, err := loadCatalog(filepath.Join(workspace, "catalog", "catalog.v1.json"))
 	if err != nil {
 		return err
@@ -161,7 +150,7 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 		return leftFile < rightFile
 	})
 	fmt.Printf("Translation progress: total=%d cached=%d translated=0 remaining=%d\n", len(prepared), cachedCount, len(prepared)-cachedCount)
-	appendTranslationLog("start total=%d cached=%d remaining=%d", len(prepared), cachedCount, len(prepared)-cachedCount)
+	event("translation_start", slog.Int("total", len(prepared)), slog.Int("cached", cachedCount), slog.Int("remaining", len(prepared)-cachedCount))
 	if len(prepared) == 0 {
 		cache.Entries = []TranslationCacheEntryV2{}
 		if err := publishTranslationCache(cachePath, cache); err != nil {
@@ -170,7 +159,7 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 		if err := os.Remove(translationFailureReportPath(workspace, catalog.TargetLocale)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove stale translation failure report: %w", err)
 		}
-		appendTranslationLog("done empty catalog")
+		event("translation_complete", slog.Int("successful", 0), slog.Int("cached", 0), slog.Int("failed", 0))
 		fmt.Println("Translation summary: successful=0 cached=0 failed=0")
 		return nil
 	}
@@ -214,11 +203,11 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 			if len(pending) == 0 {
 				switch {
 				case err != nil:
-					appendTranslationLog("response anomaly after completed results provider=%s model=%s entries=%d err=%s", lastIdentity.Provider, lastIdentity.Model, len(requests), sanitizeFailureReason(err.Error()))
+					event("translation_response_anomaly", slog.String("provider", lastIdentity.Provider), slog.String("model", lastIdentity.Model), slog.Int("batch_size", len(requests)), slog.String("kind", "provider_error"))
 				case partialValidationErr != nil:
-					appendTranslationLog("response anomaly after completed results provider=%s model=%s entries=%d err=%s", lastIdentity.Provider, lastIdentity.Model, len(requests), sanitizeFailureReason(partialValidationErr.Error()))
+					event("translation_response_anomaly", slog.String("provider", lastIdentity.Provider), slog.String("model", lastIdentity.Model), slog.Int("batch_size", len(requests)), slog.String("kind", "validation"))
 				default:
-					appendTranslationLog("validated provider=%s model=%s entries=%d", batch.Identity.Provider, batch.Identity.Model, len(requests))
+					event("translation_batch_validated", slog.String("provider", batch.Identity.Provider), slog.String("model", batch.Identity.Model), slog.Int("batch_size", len(requests)))
 					fmt.Printf("Validated batch: provider=%s model=%s entries=%d\n", batch.Identity.Provider, batch.Identity.Model, len(requests))
 				}
 				return nil
@@ -229,13 +218,13 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 					InvalidResponse()
 				}
 				if !errors.As(err, &invalid) {
-					appendTranslationLog("fatal provider=%s model=%s entries=%d err=%s", lastIdentity.Provider, lastIdentity.Model, len(pending), err)
+					event("translation_fatal", slog.String("provider", lastIdentity.Provider), slog.String("model", lastIdentity.Model), slog.Int("batch_size", len(pending)), slog.String("kind", "provider_error"))
 					return err
 				}
-				appendTranslationLog("invalid response provider=%s model=%s entries=%d attempt=%d err=%s", lastIdentity.Provider, lastIdentity.Model, len(pending), attempt+1, err)
+				event("translation_invalid_response", slog.String("provider", lastIdentity.Provider), slog.String("model", lastIdentity.Model), slog.Int("batch_size", len(pending)), slog.Int("attempt", attempt+1))
 				validationErr = invalid
 			} else if partialValidationErr != nil {
-				appendTranslationLog("validation failed provider=%s model=%s entries=%d attempt=%d err=%s", batch.Identity.Provider, batch.Identity.Model, len(pending), attempt+1, partialValidationErr)
+				event("translation_validation_failed", slog.String("provider", batch.Identity.Provider), slog.String("model", batch.Identity.Model), slog.Int("batch_size", len(pending)), slog.Int("attempt", attempt+1))
 				validationErr = partialValidationErr
 			} else {
 				validationErr = fmt.Errorf("missing result ID %q", pending[0].ID)
@@ -246,14 +235,14 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 		}
 		if len(pending) == 1 {
 			item := pendingByID[pending[0].ID]
-			appendTranslationLog("singleton failure provider=%s model=%s id=%s reason=%s", lastIdentity.Provider, lastIdentity.Model, pending[0].ID, sanitizeFailureReason(validationErr.Error()))
+			event("translation_singleton_failed", slog.String("provider", lastIdentity.Provider), slog.String("model", lastIdentity.Model), slog.String("id", pending[0].ID), slog.String("reason", sanitizeFailureReason(validationErr.Error())))
 			for _, occurrence := range groups[item.key] {
 				failures = append(failures, translationFailure{ID: occurrence.entry.ID, Provider: lastIdentity.Provider, Model: lastIdentity.Model, Kind: "validation", Reason: sanitizeFailureReason(validationErr.Error())})
 			}
 			return nil
 		}
 		middle := len(pending) / 2
-		appendTranslationLog("splitting provider=%s model=%s entries=%d into %d+%d", lastIdentity.Provider, lastIdentity.Model, len(pending), len(pending[:middle]), len(pending[middle:]))
+		event("translation_batch_split", slog.String("provider", lastIdentity.Provider), slog.String("model", lastIdentity.Model), slog.Int("batch_size", len(pending)), slog.Int("left_size", len(pending[:middle])), slog.Int("right_size", len(pending[middle:])))
 		for _, half := range [][]TranslationRequest{pending[:middle], pending[middle:]} {
 			halfByID := make(map[string]preparedTranslation, len(half))
 			for _, request := range half {
@@ -282,11 +271,11 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 			byID[request.ID] = orderedByID[request.ID]
 		}
 		fmt.Printf("Translation batch %d: entries=%d remaining=%d\n", batchNumber+1, len(requests), len(prepared)-cachedCount-translatedCount)
-		appendTranslationLog("batch %d entries=%d remaining=%d", batchNumber+1, len(requests), len(prepared)-cachedCount-translatedCount)
+		event("translation_batch", slog.Int("batch", batchNumber+1), slog.Int("batch_size", len(requests)), slog.Int("remaining", len(prepared)-cachedCount-translatedCount))
 		if err := processBatch(requests, byID); err != nil {
 			return fmt.Errorf("translate batch %d: %w", batchNumber+1, err)
 		}
-		appendTranslationLog("progress total=%d cached=%d translated=%d remaining=%d", len(prepared), cachedCount, translatedCount, len(prepared)-cachedCount-translatedCount)
+		event("translation_progress", slog.Int("total", len(prepared)), slog.Int("cached", cachedCount), slog.Int("translated", translatedCount), slog.Int("remaining", len(prepared)-cachedCount-translatedCount))
 		fmt.Printf("Translation progress: total=%d cached=%d translated=%d remaining=%d\n", len(prepared), cachedCount, translatedCount, len(prepared)-cachedCount-translatedCount)
 	}
 	reportPath := translationFailureReportPath(workspace, catalog.TargetLocale)
@@ -300,7 +289,7 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 			return err
 		}
 		fmt.Printf("Translation summary: successful=%d cached=%d failed=%d (partial)\n", translatedCount, cachedCount, len(failures))
-		appendTranslationLog("done partial successful=%d cached=%d failed=%d", translatedCount, cachedCount, len(failures))
+		event("translation_complete", slog.Int("successful", translatedCount), slog.Int("cached", cachedCount), slog.Int("failed", len(failures)))
 		for i, failure := range failures {
 			if i == 10 {
 				fmt.Printf("  ... and %d more; see %s\n", len(failures)-i, reportPath)
@@ -313,7 +302,7 @@ func translateWorkspace(ctx context.Context, workspace string, translator Transl
 	if err := os.Remove(reportPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove stale translation failure report: %w", err)
 	}
-	appendTranslationLog("done successful=%d cached=%d failed=0", translatedCount, cachedCount)
+	event("translation_complete", slog.Int("successful", translatedCount), slog.Int("cached", cachedCount), slog.Int("failed", 0))
 	fmt.Printf("Translation summary: successful=%d cached=%d failed=0\n", translatedCount, cachedCount)
 	return nil
 }
@@ -609,6 +598,9 @@ func sanitizeFailureReason(reason string) string {
 		}
 		return r
 	}, reason)
+	if strings.Contains(reason, "quarantine_path=") || strings.Contains(reason, "quarantine_capture_failed=") {
+		return truncate(reason, 1200)
+	}
 	return truncate(reason, 300)
 }
 func readFileLimited(path string, limit int64) ([]byte, error) {

@@ -17,6 +17,7 @@ func TestRootCommandParsesTranslationInvocation(t *testing.T) {
 		translate bool
 		refresh   bool
 		force     bool
+		debug     bool
 		wantError bool
 	}{
 		{name: "default extraction", args: []string{"pack"}, path: "pack"},
@@ -30,6 +31,8 @@ func TestRootCommandParsesTranslationInvocation(t *testing.T) {
 		{name: "force before path", args: []string{"--force", "pack"}, path: "pack", force: true},
 		{name: "force after path", args: []string{"pack", "--force"}, path: "pack", force: true},
 		{name: "force explicit true", args: []string{"--force=true", "pack"}, path: "pack", force: true},
+		{name: "debug before path", args: []string{"--debug", "pack"}, path: "pack", debug: true},
+		{name: "debug explicit true", args: []string{"--debug=true", "pack"}, path: "pack", debug: true},
 		{name: "translate refresh", args: []string{"--translate", "--refresh", "pack"}, path: "pack", translate: true, refresh: true},
 		{name: "unknown flag", args: []string{"--other"}, wantError: true},
 		{name: "multiple paths", args: []string{"one", "two"}, wantError: true},
@@ -37,6 +40,7 @@ func TestRootCommandParsesTranslationInvocation(t *testing.T) {
 		{name: "duplicate flag with explicit value", args: []string{"--translate", "--translate=true"}, wantError: true},
 		{name: "duplicate refresh", args: []string{"--refresh", "--refresh"}, wantError: true},
 		{name: "duplicate force", args: []string{"--force", "--force"}, wantError: true},
+		{name: "duplicate debug", args: []string{"--debug", "--debug"}, wantError: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -52,7 +56,7 @@ func TestRootCommandParsesTranslationInvocation(t *testing.T) {
 			if (err != nil) != tt.wantError {
 				t.Fatalf("Execute() error = %v", err)
 			}
-			if err == nil && (!called || got.modpackPath != tt.path || got.translate != tt.translate || got.refresh != tt.refresh || got.force != tt.force) {
+			if err == nil && (!called || got.modpackPath != tt.path || got.translate != tt.translate || got.refresh != tt.refresh || got.force != tt.force || got.debug != tt.debug) {
 				t.Fatalf("translation call = %v, options = %#v", called, got)
 			}
 		})
@@ -81,7 +85,7 @@ func TestModelsSubcommandDoesNotRunTranslation(t *testing.T) {
 }
 
 func TestRootCommandRejectsDuplicateFlags(t *testing.T) {
-	for _, name := range []string{"translate", "refresh", "force"} {
+	for _, name := range []string{"translate", "refresh", "force", "debug"} {
 		t.Run(name, func(t *testing.T) {
 			command := newRootCommand(commandDependencies{languageLimits: languageLimits{}, getenv: func(string) string { return "" }, output: &bytes.Buffer{}, runTranslation: func(cliOptions, languageLimits) error {
 				t.Fatal("duplicate flags reached translation")
@@ -94,6 +98,18 @@ func TestRootCommandRejectsDuplicateFlags(t *testing.T) {
 				t.Fatalf("Execute() error = %v, want error containing %q", err, want)
 			}
 		})
+	}
+}
+
+func TestRootCommandHelpDocumentsDebugFlag(t *testing.T) {
+	var output bytes.Buffer
+	command := newRootCommand(commandDependencies{output: &output, runTranslation: func(cliOptions, languageLimits) error { return nil }})
+	command.SetArgs([]string{"--help"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "--debug") || !strings.Contains(output.String(), "quarantine malformed provider response content for this invocation") {
+		t.Fatalf("help does not document --debug:\n%s", output.String())
 	}
 }
 

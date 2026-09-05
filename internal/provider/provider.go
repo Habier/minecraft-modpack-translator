@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -69,9 +70,31 @@ const (
 )
 
 type Error struct {
-	Identity Identity
-	Kind     ErrorKind
-	Reason   string
+	Identity       Identity
+	Kind           ErrorKind
+	Reason         string
+	HTTPStatus     int
+	Code           string
+	DetailsOmitted bool
+}
+
+// Diagnostic contains only bounded, sanitized provider failure metadata.
+type Diagnostic struct {
+	Provider         string
+	Model            string
+	HTTPStatus       int
+	Kind             ErrorKind
+	Code             string
+	DetailsOmitted   bool
+	BatchSize        int
+	Attempt          int
+	TransitionTarget string
+}
+
+// EventSink receives safe, structured application events emitted by providers.
+type EventSink interface {
+	Event(context.Context, string, ...slog.Attr)
+	ProviderFailure(context.Context, Diagnostic)
 }
 
 func (e *Error) Error() string {

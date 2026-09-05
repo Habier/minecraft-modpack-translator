@@ -815,3 +815,12 @@ func readTranslationCache(t *testing.T, path string) TranslationCacheV2 {
 	}
 	return cache
 }
+
+func TestSanitizeFailureReasonPreservesQuarantineLocation(t *testing.T) {
+	path := `C:\output\logs\invalid-provider-responses\invalid-response-gemini-model-run-hash.content`
+	reason := strings.Repeat("diagnostic ", 40) + `quarantine_path="` + path + `" quarantine_truncated=false`
+	got := sanitizeFailureReason(reason)
+	if !strings.Contains(got, path) || !strings.Contains(got, "quarantine_truncated=false") {
+		t.Fatalf("sanitized failure reason omitted quarantine location: %q", got)
+	}
+}

@@ -2,13 +2,18 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +26,7 @@ func TestProviderProfilesFromEnvDefaultChainUsesOllamaOnly(t *testing.T) {
 	if err != nil || len(profiles) != 1 || profiles[0].Name != "ollama" || profiles[0].BaseURL.String() != "http://localhost:11434/v1" || profiles[0].Mode != modeJSONSchema {
 		t.Fatalf("profiles=%#v error=%v", profiles, err)
 	}
-	translator, model, err := buildTranslatorChain(func(name string) string { return env[name] })
+	translator, model, err := BuildChain(func(name string) string { return env[name] }, nil, nil, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +240,7 @@ func TestProviderLimitsUseNormalizedProviderName(t *testing.T) {
 
 func TestBuildTranslatorChainPreservesConfiguredOrder(t *testing.T) {
 	env := providerChainEnv("together,deepinfra,ollama")
-	translator, model, err := buildTranslatorChain(func(name string) string { return env[name] })
+	translator, model, err := BuildChain(func(name string) string { return env[name] }, nil, nil, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +305,7 @@ func TestProviderChainInvalidAndDuplicateNamesRejected(t *testing.T) {
 
 func TestBuildTranslatorChainIncludesOllamaOnlyWhenPresent(t *testing.T) {
 	env := providerChainEnv("deepinfra")
-	translator, model, err := buildTranslatorChain(func(name string) string { return env[name] })
+	translator, model, err := BuildChain(func(name string) string { return env[name] }, nil, nil, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +313,7 @@ func TestBuildTranslatorChainIncludesOllamaOnlyWhenPresent(t *testing.T) {
 		t.Fatalf("chain=%s model=%s", got, model)
 	}
 	env = providerChainEnv("deepinfra,ollama")
-	translator, _, err = buildTranslatorChain(func(name string) string { return env[name] })
+	translator, _, err = BuildChain(func(name string) string { return env[name] }, nil, nil, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +427,7 @@ func TestOllamaUsesOpenAICompatibleAdapter(t *testing.T) {
 	defer server.Close()
 
 	env := map[string]string{"PROVIDER_OLLAMA_BASE_URL": server.URL + "/v1", "PROVIDER_OLLAMA_MODEL": "test:8b", "PROVIDER_OLLAMA_TIMEOUT": "3m", "PROVIDER_OLLAMA_MODE": "json_schema"}
-	translator, _, err := buildTranslatorChain(func(name string) string { return env[name] })
+	translator, _, err := BuildChain(func(name string) string { return env[name] }, nil, nil, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,6 +566,231 @@ func TestOpenAIAdapterContractAndStructuredResponse(t *testing.T) {
 	}
 }
 
+func TestOpenAITranslatorInvalidStructuredJSONDiagnostics(t *testing.T) {
+	tests := []struct {
+		name         string
+		content      string
+		finishReason string
+		wantCategory string
+		wantFenced   string
+		wantFinish   string
+	}{
+		{
+			name:         "malformed JSON includes bounded structural context",
+			content:      `{"results":[{"id":"a","translated":"PRIVATE_TRANSLATION"}]} trailing-secret`,
+			finishReason: "length",
+			wantCategory: "syntax",
+			wantFenced:   "false",
+			wantFinish:   `finish_reason="length"`,
+		},
+		{
+			name:         "markdown fence is identified without exposing output",
+			content:      "```json\n{\"results\":[]}\n```",
+			finishReason: "stop",
+			wantCategory: "syntax",
+			wantFenced:   "true",
+			wantFinish:   `finish_reason="stop"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
+					"message": map[string]any{"content": tt.content}, "finish_reason": tt.finishReason,
+				}}})
+			}))
+			defer server.Close()
+			base, _ := url.Parse(server.URL)
+			translator := newOpenAITranslator(providerProfile{Name: "gemini", Key: "REQUEST_API_KEY", Model: "m", BaseURL: base, Mode: modeJSONSchema})
+			translator.maxRetries = 0
+			_, err := translator.Translate(context.Background(), []TranslationRequest{{ID: "a", Source: "REQUEST_SOURCE_SECRET"}})
+			if err == nil {
+				t.Fatal("Translate() error = nil")
+			}
+			got := err.Error()
+			digest := sha256.Sum256([]byte(tt.content))
+			for _, want := range []string{
+				"provider returned invalid structured translation JSON:",
+				fmt.Sprintf("content_bytes=%d", len(tt.content)),
+				fmt.Sprintf("content_sha256=%x", digest),
+				"decode_category=" + tt.wantCategory,
+				"decode_detail=",
+				"decode_offset=",
+				"markdown_fenced=" + tt.wantFenced,
+				tt.wantFinish,
+				"failure_excerpt=",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("error missing %q: %s", want, got)
+				}
+			}
+			for _, forbidden := range []string{"REQUEST_SOURCE_SECRET", "REQUEST_API_KEY", "PRIVATE_TRANSLATION", "trailing-secret", tt.content} {
+				if strings.Contains(got, forbidden) {
+					t.Errorf("error exposed %q: %s", forbidden, got)
+				}
+			}
+			if len(got) > 500 {
+				t.Errorf("diagnostic length = %d, want <= 500: %s", len(got), got)
+			}
+		})
+	}
+}
+
+func TestStructuredJSONDiagnosticOmitsUnsafeFinishReason(t *testing.T) {
+	err := &json.SyntaxError{Offset: 1}
+	got := structuredJSONDiagnostic("{", "stop REQUEST_API_KEY", err)
+	if strings.Contains(got, "finish_reason") || strings.Contains(got, "REQUEST_API_KEY") {
+		t.Fatalf("diagnostic exposed unsafe finish reason: %s", got)
+	}
+}
+
+func TestBuildChainWiresDebugQuarantineLocation(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "captures")
+	env := providerChainEnv("ollama")
+	options := BuildOptions{Debug: true, InvalidResponseQuarantineDirectory: directory, RunID: "run-7"}
+	translator, _, err := BuildChain(func(name string) string { return env[name] }, nil, nil, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := translator.(*chainTranslator)
+	got := chain.providers[0].(*openAITranslator).profile.Quarantine
+	if !got.enabled || got.directory != directory || got.runID != "run-7" {
+		t.Fatalf("quarantine configuration = %#v", got)
+	}
+}
+
+func TestBuildChainDefaultsQuarantineOff(t *testing.T) {
+	env := providerChainEnv("ollama")
+	translator, _, err := BuildChain(func(name string) string { return env[name] }, nil, nil, BuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := translator.(*chainTranslator).providers[0].(*openAITranslator).profile.Quarantine
+	if got.enabled || got.directory != "" || got.runID != "" {
+		t.Fatalf("quarantine configuration = %#v", got)
+	}
+}
+
+func TestBuildChainRejectsIncompleteDebugLocation(t *testing.T) {
+	env := providerChainEnv("ollama")
+	_, _, err := BuildChain(func(name string) string { return env[name] }, nil, nil, BuildOptions{Debug: true})
+	if err == nil || !strings.Contains(err.Error(), "debug mode requires an invalid response quarantine location and run ID") {
+		t.Fatalf("BuildChain() error = %v", err)
+	}
+}
+
+func TestInvalidResponseQuarantineCapturesOnlyOptedInDecodeFailures(t *testing.T) {
+	const invalid = `{"results":[{"id":"a","translated":"exact provider output"}]}` + " trailing"
+	directory := filepath.Join(t.TempDir(), "quarantine")
+	translator, closeServer := quarantineTestTranslator(t, invalid, invalidResponseQuarantine{enabled: true, directory: directory, runID: "run:42"})
+	defer closeServer()
+
+	_, err := translator.Translate(context.Background(), []TranslationRequest{{ID: "a", Source: "source secret"}})
+	if err == nil || !strings.Contains(err.Error(), "provider returned invalid structured translation JSON:") || !strings.Contains(err.Error(), "quarantine_path=") || !strings.Contains(err.Error(), "quarantine_truncated=false") {
+		t.Fatalf("Translate() error = %v", err)
+	}
+	files, globErr := filepath.Glob(filepath.Join(directory, "*.content"))
+	if globErr != nil || len(files) != 1 {
+		t.Fatalf("quarantine files = %v, error = %v", files, globErr)
+	}
+	data, readErr := os.ReadFile(files[0])
+	if readErr != nil || string(data) != invalid {
+		t.Fatalf("quarantine content = %q, error = %v", data, readErr)
+	}
+	for _, want := range []string{"invalid-response-provider_name-model_name-run_42-", fmt.Sprintf("content_sha256=%x", sha256.Sum256([]byte(invalid)))} {
+		if !strings.Contains(filepath.Base(files[0])+err.Error(), want) {
+			t.Errorf("capture identity missing %q: path=%q error=%v", want, files[0], err)
+		}
+	}
+	if info, statErr := os.Stat(files[0]); statErr != nil {
+		t.Errorf("stat quarantine file: %v", statErr)
+	} else if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
+		t.Errorf("quarantine permissions = %v, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestInvalidResponseQuarantineIsBoundedAndCollisionSafe(t *testing.T) {
+	content := strings.Repeat("x", maxInvalidResponseCaptureBytes+123)
+	directory := filepath.Join(t.TempDir(), "quarantine")
+	translator, closeServer := quarantineTestTranslator(t, content, invalidResponseQuarantine{enabled: true, directory: directory, runID: "same-run"})
+	defer closeServer()
+
+	for attempt := 0; attempt < 2; attempt++ {
+		_, err := translator.Translate(context.Background(), []TranslationRequest{{ID: "a"}})
+		if err == nil || !strings.Contains(err.Error(), "quarantine_truncated=true") {
+			t.Fatalf("Translate() attempt %d error = %v", attempt, err)
+		}
+	}
+	files, err := filepath.Glob(filepath.Join(directory, "*.content"))
+	if err != nil || len(files) != 2 || filepath.Base(files[0]) == filepath.Base(files[1]) {
+		t.Fatalf("collision files = %v, error = %v", files, err)
+	}
+	for _, path := range files {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil || len(data) != maxInvalidResponseCaptureBytes || string(data) != content[:maxInvalidResponseCaptureBytes] {
+			t.Fatalf("bounded capture %q has %d bytes, error = %v", path, len(data), readErr)
+		}
+	}
+}
+
+func TestInvalidResponseQuarantineDefaultOffAndValidResponseCreateNothing(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string
+		quarantine invalidResponseQuarantine
+		wantErr    bool
+	}{
+		{name: "default off malformed response", content: "{", wantErr: true},
+		{name: "opted in valid response", content: `{"results":[{"id":"a","translated":"Hola"}]}`, quarantine: invalidResponseQuarantine{enabled: true}, wantErr: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			directory := filepath.Join(t.TempDir(), "quarantine")
+			tt.quarantine.directory = directory
+			translator, closeServer := quarantineTestTranslator(t, tt.content, tt.quarantine)
+			defer closeServer()
+			_, err := translator.Translate(context.Background(), []TranslationRequest{{ID: "a"}})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Translate() error = %v, want error = %t", err, tt.wantErr)
+			}
+			if tt.wantErr && !strings.Contains(err.Error(), "quarantine=disabled") {
+				t.Fatalf("default-off error = %v", err)
+			}
+			if _, statErr := os.Stat(directory); !os.IsNotExist(statErr) {
+				t.Fatalf("quarantine directory exists after non-capture: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestInvalidResponseQuarantineWriteFailurePreservesTranslationFailure(t *testing.T) {
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	translator, closeServer := quarantineTestTranslator(t, "{", invalidResponseQuarantine{enabled: true, directory: blocked, runID: "run"})
+	defer closeServer()
+	_, err := translator.Translate(context.Background(), []TranslationRequest{{ID: "a"}})
+	if err == nil || !strings.Contains(err.Error(), "provider returned invalid structured translation JSON:") || !strings.Contains(err.Error(), "quarantine_capture_failed=") || !strings.Contains(err.Error(), "quarantine_truncated=false") {
+		t.Fatalf("Translate() error = %v", err)
+	}
+}
+
+func quarantineTestTranslator(t *testing.T, content string, quarantine invalidResponseQuarantine) (*openAITranslator, func()) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": content}, "finish_reason": "length"}}})
+	}))
+	base, err := url.Parse(server.URL)
+	if err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	translator := newOpenAITranslator(providerProfile{Name: "provider/name", Model: "model:name", BaseURL: base, Mode: modeJSONSchema, Quarantine: quarantine})
+	translator.maxRetries = 0
+	return translator, server.Close
+}
+
 func TestProviderClassifiers(t *testing.T) {
 	tests := []struct {
 		provider string
@@ -585,6 +815,36 @@ func TestProviderClassifiers(t *testing.T) {
 			var providerErr *ProviderError
 			if !errors.As(err, &providerErr) || providerErr.Kind != tt.kind || strings.Contains(err.Error(), tt.body) {
 				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestProviderDiagnosticsFailClosedOnProviderControlledDetails(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantCode string
+	}{
+		{name: "safe code survives", body: `{"error":{"code":"invalid_parameter","message":"quoted and transformed sensitive prose"}}`, wantCode: "invalid_parameter"},
+		{name: "prose code omitted", body: `{"error":{"code":"bad code/private-secret","message":"translated content"}}`},
+		{name: "oversized code omitted", body: `{"error":{"code":"` + strings.Repeat("a", 129) + `","message":"source fragment"}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := classifyProviderResponse("groq", ProviderIdentity{Provider: "groq", Model: "m"}, 422, []byte(tt.body))
+			var providerErr *ProviderError
+			if !errors.As(err, &providerErr) {
+				t.Fatalf("error type = %T, want *ProviderError", err)
+			}
+			if providerErr.Code != tt.wantCode || !providerErr.DetailsOmitted {
+				t.Fatalf("provider error = %#v, want code %q with omitted details", providerErr, tt.wantCode)
+			}
+			serialized := fmt.Sprintf("%#v", Diagnostic{Code: providerErr.Code, DetailsOmitted: providerErr.DetailsOmitted})
+			for _, forbidden := range []string{"sensitive prose", "private-secret", "translated content", "source fragment"} {
+				if strings.Contains(serialized, forbidden) {
+					t.Fatalf("diagnostic exposed %q: %s", forbidden, serialized)
+				}
 			}
 		})
 	}
@@ -801,6 +1061,83 @@ func TestChainAdvancesPermanentlyOnlyForQuota(t *testing.T) {
 	if err != nil || fallback.calls != 1 || batch.Identity.Provider != "fallback" {
 		t.Fatalf("batch=%#v error=%v fallback=%d", batch, err, fallback.calls)
 	}
+}
+
+func TestChainReportsSanitizedProviderDiagnostic(t *testing.T) {
+	identity := ProviderIdentity{Provider: "groq", Model: "qwen/qwen3.6-27b"}
+	failed := &scriptedTranslator{identity: identity, errors: []error{&ProviderError{Identity: identity, Kind: ErrorRequest, Reason: "HTTP 422", HTTPStatus: 422, Code: "invalid_parameter", DetailsOmitted: true}}}
+	fallback := &scriptedTranslator{identity: ProviderIdentity{Provider: "ollama", Model: "local"}}
+	sink := &recordingEventSink{}
+	chain := &chainTranslator{providers: []Translator{failed, fallback}, events: sink}
+
+	if _, err := chain.Translate(context.Background(), []TranslationRequest{{ID: "a", Source: "sensitive source text"}}); err != nil {
+		t.Fatalf("Translate() error = %v", err)
+	}
+	got := sink.failure
+	if got.Provider != "groq" || got.Model != identity.Model || got.HTTPStatus != 422 || got.Kind != ErrorRequest || got.BatchSize != 1 || got.Attempt != 1 || got.TransitionTarget != "ollama" {
+		t.Fatalf("diagnostic = %#v", got)
+	}
+	if strings.Contains(fmt.Sprintf("%#v", got), "sensitive source text") {
+		t.Fatalf("diagnostic exposed source text: %#v", got)
+	}
+}
+
+func TestChainKeepsConsoleOutputVisibleAndWritesEventsToHumanLog(t *testing.T) {
+	identity := ProviderIdentity{Provider: "groq", Model: "remote"}
+	failed := &scriptedTranslator{identity: identity, errors: []error{&ProviderError{Identity: identity, Kind: ErrorQuota, Reason: "HTTP 429", HTTPStatus: 429}}}
+	fallback := &scriptedTranslator{identity: ProviderIdentity{Provider: "ollama", Model: "local"}}
+	logPath := filepath.Join(t.TempDir(), "translation-20260831T123456.789Z-4242.log")
+	file, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := humanTextEventSink{logger: slog.New(slog.NewTextHandler(file, nil))}
+	var console strings.Builder
+	chain := &chainTranslator{providers: []Translator{failed, fallback}, output: &console, events: sink}
+
+	if _, err := chain.Translate(context.Background(), []TranslationRequest{{ID: "a", Source: "Hello"}}); err != nil {
+		_ = file.Close()
+		t.Fatalf("Translate() error = %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Provider attempt: groq model=remote entries=1",
+		"Provider transition: groq -> ollama kind=quota_exhausted reason=quota_exhausted",
+		"Provider attempt: ollama model=local entries=1",
+	} {
+		if !strings.Contains(console.String(), want) {
+			t.Errorf("console output %q does not contain %q", console.String(), want)
+		}
+	}
+	human, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"msg=provider_attempt provider=groq model=remote batch_size=1",
+		"msg=provider_transition provider=groq model=remote kind=quota_exhausted transition_target=ollama",
+		"msg=provider_attempt provider=ollama model=local batch_size=1",
+	} {
+		if !strings.Contains(string(human), want) {
+			t.Errorf("human log %q does not contain %q", human, want)
+		}
+	}
+}
+
+type humanTextEventSink struct{ logger *slog.Logger }
+
+func (s humanTextEventSink) Event(ctx context.Context, event string, attrs ...slog.Attr) {
+	s.logger.LogAttrs(ctx, slog.LevelInfo, event, attrs...)
+}
+func (humanTextEventSink) ProviderFailure(context.Context, Diagnostic) {}
+
+type recordingEventSink struct{ failure Diagnostic }
+
+func (s *recordingEventSink) Event(context.Context, string, ...slog.Attr) {}
+func (s *recordingEventSink) ProviderFailure(_ context.Context, diagnostic Diagnostic) {
+	s.failure = diagnostic
 }
 
 func TestChainPlansWithCurrentlyActiveProvider(t *testing.T) {

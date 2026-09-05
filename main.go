@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -73,17 +74,17 @@ func runTranslation(options cliOptions, limits languageLimits) (err error) {
 	if err != nil {
 		return err
 	}
-	logSession, err := startSessionLog(modpackPath)
+	appLog, err := startApplicationLog(modpackPath)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if err != nil {
-			logSession.writeError(err)
+			appLog.Event(context.Background(), "run_error", slog.String("error", err.Error()))
 		}
-		_ = logSession.close()
+		err = propagateApplicationLogClose(err, appLog)
 	}()
-	fmt.Printf("Session log: %s\n", logSession.path)
+	appLog.reportPaths(os.Stdout)
 	if options.translate {
 		if err := writeback.RemoveStaleZip(modpackPath); err != nil {
 			return err
@@ -162,12 +163,12 @@ func runTranslation(options cliOptions, limits languageLimits) (err error) {
 	fmt.Printf("\nTranslation workspace (pending files):\n%s\n", workspacePath)
 	fmt.Printf("\nExport resource pack (metadata and completed translations only):\n%s\n", exportPackPath)
 	if options.translate {
-		translator, _, err := provider.BuildChain(os.Getenv, appendTranslationLog)
+		translator, _, err := provider.BuildChain(os.Getenv, os.Stdout, appLog, appLog.providerBuildOptions(options.debug))
 		if err != nil {
 			return err
 		}
 		fmt.Printf("\n%s\nTranslating catalog with the configured provider chain\n", provider.ChainSummary(os.Getenv))
-		if err := translateWorkspace(context.Background(), workspacePath, translator, translationOptions{}); err != nil {
+		if err := translateWorkspace(context.Background(), workspacePath, translator, translationOptions{events: appLog}); err != nil {
 			return err
 		}
 		fmt.Printf("Validated translations cached at:\n%s\n", translationCachePath(workspacePath, targetLocale))
