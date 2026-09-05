@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -184,14 +185,16 @@ func TestTranslateWorkspaceUsesDeterministicContiguousProviderPlans(t *testing.T
 	}
 }
 
-func TestTranslateWorkspaceSendsShortPlaceholdersAndRestoresTokens(t *testing.T) {
+func TestTranslateWorkspaceSendsSafeSentinelsAndRestoresTokens(t *testing.T) {
 	workspace := t.TempDir()
 	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "Hello %s and {name}", "a.json")})
 	provider := &fakeTranslator{fn: func(_ int, requests []TranslationRequest) ([]TranslationResult, error) {
-		if got := requests[0].Source; got != `Hello <keep id="0"/> and <keep id="1"/>` {
+		got := requests[0].Source
+		markers := regexp.MustCompile(`MPTK_[A-Z0-9]{16}_[0-9A-F]{8}_END`).FindAllString(got, -1)
+		if len(markers) != 2 || strings.ContainsAny(strings.Join(markers, ""), `<>/"'\\`) {
 			t.Fatalf("provider-visible source = %q", got)
 		}
-		return []TranslationResult{{ID: requests[0].ID, Translated: `Hola <keep id="0"/> y <keep id="1"/>`}}, nil
+		return []TranslationResult{{ID: requests[0].ID, Translated: "Hola " + markers[0] + " y " + markers[1]}}, nil
 	}}
 
 	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{}); err != nil {
@@ -233,6 +236,34 @@ func TestTranslateWorkspaceInvalidatesV2CacheForImmutablePlaceholderContract(t *
 	updated := readTranslationCache(t, cachePath)
 	if updated.PromptVersion != translationPromptV3 {
 		t.Fatalf("prompt version = %q, want %q", updated.PromptVersion, translationPromptV3)
+	}
+}
+
+func TestTranslateWorkspaceReusesV3FinalTranslationAcrossMarkerEncoding(t *testing.T) {
+	workspace := t.TempDir()
+	writeTranslationCatalog(t, workspace, []CatalogEntryV1{catalogTranslationEntry("a", "Hello %s", "a.json")})
+	provider := &fakeTranslator{}
+	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	cachePath := translationCachePath(workspace)
+	cache := readTranslationCache(t, cachePath)
+	cache.Entries[0].CacheKey = sha256Hex(`legacy-<keep id="0"/>`)
+	data, err := json.Marshal(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachePath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider.calls = nil
+
+	if err := translateWorkspace(context.Background(), workspace, provider, translationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.calls) != 0 {
+		t.Fatalf("valid v3 final translation was retransmitted: provider calls=%#v", provider.calls)
 	}
 }
 

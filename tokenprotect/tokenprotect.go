@@ -3,6 +3,7 @@ package tokenprotect
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"unicode"
@@ -37,7 +38,7 @@ type protectedToken struct {
 // Text is a protected translation payload and retains the data needed to restore it.
 type Text struct {
 	Protected string
-	tag       string
+	namespace string
 	tokens    []protectedToken
 }
 
@@ -79,11 +80,22 @@ func Find(source string) []Token {
 	return tokens
 }
 
-// Protect replaces tokens with short XML-style placeholders. A scoped tag is
-// derived from the complete source when the default tag would collide with it.
+const (
+	markerPrefix     = "MPTK_"
+	markerNonceWidth = 16
+	markerIndexWidth = 8
+	markerSuffix     = "_END"
+	markerRetryLimit = 256
+)
+
+// Protect replaces tokens with bounded plain-ASCII sentinels. A namespace is
+// derived from the complete source and retried if it collides with literal text.
 func Protect(source string) (*Text, error) {
 	tokens := Find(source)
-	tag, err := placeholderTag(source)
+	if uint64(len(tokens)) > uint64(^uint32(0)) {
+		return nil, &Error{Problem: "too many protected tokens", Offset: -1}
+	}
+	namespace, err := markerNamespace(source)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +105,7 @@ func Protect(source string) (*Text, error) {
 	protected := make([]protectedToken, 0, len(tokens))
 	last := 0
 	for i, token := range tokens {
-		marker := fmt.Sprintf(`<%s id="%d"/>`, tag, i)
+		marker := fmt.Sprintf("%s%0*X%s", namespace, markerIndexWidth, i, markerSuffix)
 		out.WriteString(source[last:token.Start])
 		out.WriteString(marker)
 		protected = append(protected, protectedToken{
@@ -103,7 +115,7 @@ func Protect(source string) (*Text, error) {
 		last = token.End
 	}
 	out.WriteString(source[last:])
-	return &Text{Protected: out.String(), tag: tag, tokens: protected}, nil
+	return &Text{Protected: out.String(), namespace: namespace, tokens: protected}, nil
 }
 
 // Tokens returns a copy of the protected source token metadata.
@@ -132,32 +144,18 @@ func (t *Text) Restore(translated string) (string, error) {
 		positions[i] = -1
 	}
 
-	rawStart := "<" + t.tag
-	escapedStart := "&lt;" + t.tag
 	for at := 0; ; {
-		rawRel := exactTagStart(translated[at:], rawStart)
-		escapedRel := exactTagStart(translated[at:], escapedStart)
-		if rawRel < 0 && escapedRel < 0 {
+		rel := strings.Index(translated[at:], t.namespace)
+		if rel < 0 {
 			break
 		}
-		if escapedRel >= 0 && (rawRel < 0 || escapedRel < rawRel) {
-			start := at + escapedRel
-			return "", &Error{Problem: "escaped placeholder", Marker: safePlaceholder(translated[start:]), Offset: start}
+		start := at + rel
+		candidate := translated[start:]
+		markerLength := len(t.namespace) + markerIndexWidth + len(markerSuffix)
+		if len(candidate) < markerLength || !validMarkerIndex(candidate[len(t.namespace):len(t.namespace)+markerIndexWidth]) || candidate[len(t.namespace)+markerIndexWidth:markerLength] != markerSuffix {
+			return "", &Error{Problem: "malformed placeholder", Marker: safeSentinel(candidate), Offset: start}
 		}
-		start := at + rawRel
-		end := start + len(rawStart)
-		if end >= len(translated) || translated[end] != ' ' || !strings.HasPrefix(translated[end:], ` id="`) {
-			return "", &Error{Problem: "malformed placeholder", Marker: safePlaceholder(translated[start:]), Offset: start}
-		}
-		end += len(` id="`)
-		digitStart := end
-		for end < len(translated) && translated[end] >= '0' && translated[end] <= '9' {
-			end++
-		}
-		if end == digitStart || end+3 > len(translated) || translated[end:end+3] != `"/>` {
-			return "", &Error{Problem: "malformed placeholder", Marker: safePlaceholder(translated[start:]), Offset: start}
-		}
-		marker := translated[start : end+3]
+		marker := translated[start : start+markerLength]
 		index, known := byMarker[marker]
 		if !known {
 			return "", &Error{Problem: "unknown placeholder", Marker: marker, Offset: start}
@@ -167,8 +165,8 @@ func (t *Text) Restore(translated string) (string, error) {
 		}
 		seen[index] = true
 		positions[index] = start
-		occurrences = append(occurrences, occurrence{start: start, end: end + 3, index: index})
-		at = end + 3
+		occurrences = append(occurrences, occurrence{start: start, end: start + markerLength, index: index})
+		at = start + markerLength
 	}
 
 	for i, ok := range seen {
@@ -194,50 +192,41 @@ func (t *Text) Restore(translated string) (string, error) {
 	return result.String(), nil
 }
 
-func placeholderTag(source string) (string, error) {
-	if !placeholderTagCollides(source, "keep") {
-		return "keep", nil
-	}
-	for nonce := 0; nonce < 256; nonce++ {
+func markerNamespace(source string) (string, error) {
+	for nonce := 0; nonce < markerRetryLimit; nonce++ {
 		digest := sha256.Sum256([]byte(fmt.Sprintf("tokenprotect:%d:%s", nonce, source)))
-		tag := fmt.Sprintf("keep-%x", digest[:4])
-		if !placeholderTagCollides(source, tag) {
-			return tag, nil
+		nonceText := strings.ToUpper(hex.EncodeToString(digest[:markerNonceWidth/2]))
+		namespace := markerPrefix + nonceText + "_"
+		if !strings.Contains(source, namespace) {
+			return namespace, nil
 		}
 	}
-	return "", &Error{Problem: "could not derive a collision-free placeholder tag", Offset: -1}
+	return "", &Error{Problem: "could not derive a collision-free placeholder namespace", Offset: -1}
 }
 
-func placeholderTagCollides(source, tag string) bool {
-	return exactTagStart(source, "<"+tag) >= 0 || exactTagStart(source, "&lt;"+tag) >= 0
-}
-
-func exactTagStart(value, start string) int {
-	for offset := 0; offset < len(value); {
-		rel := strings.Index(value[offset:], start)
-		if rel < 0 {
-			return -1
-		}
-		at := offset + rel
-		after := at + len(start)
-		if after == len(value) || !isXMLNameByte(value[after]) {
-			return at
-		}
-		offset = after
+func validMarkerIndex(value string) bool {
+	if len(value) != markerIndexWidth {
+		return false
 	}
-	return -1
+	for i := range value {
+		if !isUpperHex(value[i]) {
+			return false
+		}
+	}
+	return true
 }
 
-func isXMLNameByte(value byte) bool {
-	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || strings.ContainsRune("_.:-", rune(value))
+func isUpperHex(value byte) bool {
+	return value >= 'A' && value <= 'F' || value >= '0' && value <= '9'
 }
 
-func safePlaceholder(value string) string {
+func isSentinelByte(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '_'
+}
+
+func safeSentinel(value string) string {
 	end := 0
-	for end < len(value) && end < 64 && value[end] != '>' && value[end] != '\n' && value[end] != '\r' {
-		end++
-	}
-	if end < len(value) && value[end] == '>' {
+	for end < len(value) && end < 64 && isSentinelByte(value[end]) {
 		end++
 	}
 	return value[:end]

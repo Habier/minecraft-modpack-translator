@@ -2,11 +2,18 @@ package tokenprotect_test
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 
 	"modpack-translator/tokenprotect"
 )
+
+var sentinelPattern = regexp.MustCompile(`MPTK_[A-Z0-9]{16}_[0-9A-F]{8}_END`)
+
+func sentinels(value string) []string {
+	return sentinelPattern.FindAllString(value, -1)
+}
 
 func TestFind(t *testing.T) {
 	tests := []struct {
@@ -81,15 +88,20 @@ func TestRestoreRejectsInvalidPlaceholders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, second := `<keep id="0"/>`, `<keep id="1"/>`
+	markers := sentinels(protected.Protected)
+	if len(markers) != 2 {
+		t.Fatalf("sentinels = %#v", markers)
+	}
+	first, second := markers[0], markers[1]
+	unknown := first[:22] + "FFFFFFFF_END"
 	tests := []struct {
 		name, translated, problem string
 	}{
 		{"missing", "Valor " + first, "missing placeholder"},
 		{"duplicated", "Valor " + first + " " + first + " " + second, "duplicated placeholder"},
-		{"unknown", "Valor " + first + ` <keep id="999"/>`, "unknown placeholder"},
-		{"malformed", "Valor " + first + ` <keep id="1">`, "malformed placeholder"},
-		{"escaped", "Valor " + first + ` &lt;keep id="1"/&gt;`, "escaped placeholder"},
+		{"unknown", "Valor " + first + " " + unknown, "unknown placeholder"},
+		{"malformed index", "Valor " + first + " " + second[:22] + "ZZZZZZZZ_END", "malformed placeholder"},
+		{"malformed suffix", "Valor " + first + " " + second[:30] + "_STOP", "malformed placeholder"},
 		{"reordered", "Valor " + second + " " + first, "placeholders were reordered"},
 	}
 	for _, tt := range tests {
@@ -106,39 +118,15 @@ func TestRestoreRejectsInvalidPlaceholders(t *testing.T) {
 	}
 }
 
-func TestRestoreIgnoresBenignPlaceholderTagPrefixes(t *testing.T) {
-	tests := []struct {
-		name   string
-		source string
-		prefix func(string) string
-	}{
-		{
-			name:   "default tag raw and escaped prefixes",
-			source: "Value %s",
-			prefix: func(string) string { return `<keeper>safe</keeper> &lt;keepalive <keep id="0"/>` },
-		},
-		{
-			name:   "scoped tag raw and escaped prefixes",
-			source: `Literal <keep id="9"/> and %s`,
-			prefix: func(protected string) string {
-				start := strings.Index(protected, "<keep-")
-				end := strings.Index(protected[start:], " ")
-				tag := protected[start+1 : start+end]
-				return "<" + tag + `alive>safe</` + tag + `alive> &lt;` + tag + `keeper ` + protected[start:start+strings.Index(protected[start:], ">")+1]
-			},
-		},
+func TestRestoreIgnoresBenignSentinelPrefixes(t *testing.T) {
+	protected, err := tokenprotect.Protect("Value %s")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			protected, err := tokenprotect.Protect(tt.source)
-			if err != nil {
-				t.Fatal(err)
-			}
-			translated := tt.prefix(protected.Protected)
-			if _, err := protected.Restore(translated); err != nil {
-				t.Fatalf("Restore(%q) rejected benign tag prefix text: %v", translated, err)
-			}
-		})
+	marker := sentinels(protected.Protected)[0]
+	translated := "MPTK_KEEP and MPTK_ABCDEFGHIJKLMNOPQ_00000000_END " + marker
+	if _, err := protected.Restore(translated); err != nil {
+		t.Fatalf("Restore(%q) rejected benign prefix text: %v", translated, err)
 	}
 }
 
@@ -147,7 +135,11 @@ func TestRepeatedIdenticalTokensHaveDistinctMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, second := `<keep id="0"/>`, `<keep id="1"/>`
+	markers := sentinels(protected.Protected)
+	if len(markers) != 2 {
+		t.Fatalf("sentinels = %#v", markers)
+	}
+	first, second := markers[0], markers[1]
 	if !strings.Contains(protected.Protected, first) || !strings.Contains(protected.Protected, second) {
 		t.Fatal("repeated occurrences must have distinct markers")
 	}
@@ -156,15 +148,17 @@ func TestRepeatedIdenticalTokensHaveDistinctMarkers(t *testing.T) {
 	}
 }
 
-func TestPlaceholderTagIsShortAndAvoidsSourceCollision(t *testing.T) {
+func TestSentinelNamespaceIsDeterministicAndAvoidsSourceCollision(t *testing.T) {
 	base, err := tokenprotect.Protect("Hello %s")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if base.Protected != `Hello <keep id="0"/>` {
-		t.Fatalf("default protected payload = %q", base.Protected)
+	baseMarkers := sentinels(base.Protected)
+	if len(baseMarkers) != 1 || base.Protected != "Hello "+baseMarkers[0] {
+		t.Fatalf("protected payload = %q", base.Protected)
 	}
-	source := `Existing <keep id="0"/> and &lt;keep id="1"/&gt; remain literal beside %s`
+	literal := "MPTK_0123456789ABCDEF_00000000_END"
+	source := "Existing " + literal + " remains literal beside %s"
 	one, err := tokenprotect.Protect(source)
 	if err != nil {
 		t.Fatal(err)
@@ -176,11 +170,33 @@ func TestPlaceholderTagIsShortAndAvoidsSourceCollision(t *testing.T) {
 	if one.Protected != two.Protected {
 		t.Fatal("marker derivation is not deterministic")
 	}
-	if !strings.Contains(one.Protected, `<keep id="0"/>`) || !strings.Contains(one.Protected, `&lt;keep id="1"/&gt;`) || !strings.Contains(one.Protected, `<keep-`) {
-		t.Fatalf("source collision was not isolated with a scoped tag: %q", one.Protected)
+	markers := sentinels(one.Protected)
+	if len(markers) != 2 || markers[0] != literal || markers[1] == literal {
+		t.Fatalf("source collision was not isolated with a scoped namespace: %q", one.Protected)
 	}
 	if got, err := one.Restore(one.Protected); err != nil || got != source {
 		t.Fatalf("collision round trip = %q, %v", got, err)
+	}
+}
+
+func TestPatchouliQuotedTooltipUsesSafeSentinels(t *testing.T) {
+	source := `$(item)Hover: $(t:"minecraft:diamond")Diamond$()$(/t)`
+	protected, err := tokenprotect.Protect(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markers := sentinels(protected.Protected)
+	if len(markers) == 0 {
+		t.Fatal("expected protected Patchouli markers")
+	}
+	for _, marker := range markers {
+		if strings.ContainsAny(marker, `<>/"'\\`) {
+			t.Fatalf("provider-facing marker contains unsafe syntax: %q", marker)
+		}
+	}
+	got, err := protected.Restore(protected.Protected)
+	if err != nil || got != source {
+		t.Fatalf("Patchouli round trip = %q, %v", got, err)
 	}
 }
 
