@@ -51,6 +51,7 @@ type providerProfile struct {
 	Name, Key, Model string
 	BaseURL          *url.URL
 	Mode             capabilityMode
+	ReasoningEffort  string
 	ArrayLength      bool
 	RequireParams    bool
 	Timeout          time.Duration
@@ -96,6 +97,15 @@ func providerProfileFromEnv(entry providerChainEntry, getenv func(string) string
 	if err != nil {
 		return providerProfile{}, err
 	}
+	reasoningEnv := prefix + "REASONING_EFFORT"
+	defaultReasoningEffort := ""
+	if entry.name == "gemini" {
+		defaultReasoningEffort = "low"
+	}
+	reasoningEffort, err := parseReasoningEffort(getenv(reasoningEnv), reasoningEnv, defaultReasoningEffort)
+	if err != nil {
+		return providerProfile{}, err
+	}
 	if containsControlCharacter(entry.name) || containsControlCharacter(rawBase) || containsControlCharacter(rawKey) || containsControlCharacter(rawModel) {
 		return providerProfile{}, fmt.Errorf("provider %s configuration contains invalid control characters", entry.name)
 	}
@@ -120,7 +130,20 @@ func providerProfileFromEnv(entry providerChainEntry, getenv func(string) string
 	if err != nil {
 		return providerProfile{}, err
 	}
-	return providerProfile{Name: entry.name, Key: key, Model: model, BaseURL: parsed, Mode: mode, ArrayLength: entry.capabilities.arrayLength, RequireParams: entry.capabilities.requireParams, Timeout: timeout, Limits: limits}, nil
+	return providerProfile{Name: entry.name, Key: key, Model: model, BaseURL: parsed, Mode: mode, ReasoningEffort: reasoningEffort, ArrayLength: entry.capabilities.arrayLength, RequireParams: entry.capabilities.requireParams, Timeout: timeout, Limits: limits}, nil
+}
+
+func parseReasoningEffort(raw, envName, defaultValue string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return defaultValue, nil
+	}
+	switch value {
+	case "minimal", "low", "medium", "high":
+		return value, nil
+	default:
+		return "", fmt.Errorf("%s must be one of: minimal, low, medium, high", envName)
+	}
 }
 
 func providerLimitsFromEnv(prefix string, getenv func(string) string) (Limits, error) {
@@ -356,6 +379,9 @@ func (o *openAITranslator) requestBody(items []TranslationRequest) ([]byte, erro
 		return nil, err
 	}
 	requestBody := map[string]any{"model": o.profile.Model, "messages": []map[string]string{{"role": "system", "content": translationSystemPrompt}, {"role": "user", "content": userPrompt}}, "temperature": 0, "max_tokens": o.profile.Limits.MaxOutputTokens}
+	if o.profile.ReasoningEffort != "" {
+		requestBody["reasoning_effort"] = o.profile.ReasoningEffort
+	}
 	if o.profile.Mode == modeJSONSchema {
 		requestBody["response_format"] = map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "translation_batch", "strict": true, "schema": translationSchemaFor(len(items), o.profile.ArrayLength)}}
 	} else {

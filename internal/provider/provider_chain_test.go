@@ -46,11 +46,77 @@ func TestProviderProfilesFromEnvCustomProviderParsing(t *testing.T) {
 	if err != nil || len(profiles) != 2 {
 		t.Fatalf("profiles=%#v error=%v", profiles, err)
 	}
-	if profiles[0].Name != "deepinfra" || profiles[0].BaseURL.String() != "https://api.deepinfra.com/v1/openai" || profiles[0].Mode != modeJSONSchema {
+	if profiles[0].Name != "deepinfra" || profiles[0].BaseURL.String() != "https://api.deepinfra.com/v1/openai" || profiles[0].Mode != modeJSONSchema || profiles[0].ReasoningEffort != "" {
 		t.Fatalf("deepinfra profile=%#v", profiles[0])
 	}
 	if profiles[1].Name != "together-ai" || profiles[1].Mode != modeJSONObject {
 		t.Fatalf("together profile=%#v", profiles[1])
+	}
+}
+
+func TestProviderReasoningEffortFromEnv(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		override string
+		want     string
+		wantErr  string
+	}{
+		{name: "Gemini defaults to low", provider: "gemini", want: "low"},
+		{name: "another provider omits an empty value", provider: "deepinfra"},
+		{name: "explicit override is preserved", provider: "gemini", override: "minimal", want: "minimal"},
+		{name: "invalid value is rejected", provider: "gemini", override: "none", wantErr: "PROVIDER_GEMINI_REASONING_EFFORT must be one of: minimal, low, medium, high"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := providerChainEnv(tt.provider)
+			prefix := "PROVIDER_" + strings.ToUpper(tt.provider) + "_"
+			env[prefix+"REASONING_EFFORT"] = tt.override
+			if tt.provider == "gemini" {
+				env[prefix+"BASE_URL"] = "https://generativelanguage.googleapis.com/v1beta/openai"
+				env[prefix+"API_KEY"] = "gemini-secret"
+				env[prefix+"MODEL"] = "gemini-3.1-flash-lite"
+			}
+			profiles, err := providerProfilesFromEnv(func(name string) string { return env[name] })
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("error=%v want=%q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || len(profiles) != 1 || profiles[0].ReasoningEffort != tt.want {
+				t.Fatalf("profiles=%#v want reasoning effort %q error=%v", profiles, tt.want, err)
+			}
+		})
+	}
+}
+
+func TestRequestBodyIncludesOnlyConfiguredReasoningEffort(t *testing.T) {
+	base, _ := url.Parse("https://example.test/v1")
+	tests := []struct {
+		name        string
+		profile     providerProfile
+		want        string
+		wantPresent bool
+	}{
+		{name: "Gemini sends low", profile: providerProfile{Name: "gemini", Model: "gemini-3.1-flash-lite", BaseURL: base, Mode: modeJSONSchema, ReasoningEffort: "low"}, want: "low", wantPresent: true},
+		{name: "unconfigured provider omits field", profile: providerProfile{Name: "deepinfra", Model: "model", BaseURL: base, Mode: modeJSONSchema}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := newOpenAITranslator(tt.profile).requestBody([]TranslationRequest{{ID: "a", Source: "Hello"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal(body, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			got, present := decoded["reasoning_effort"]
+			if present != tt.wantPresent || present && got != tt.want {
+				t.Fatalf("reasoning_effort=%#v present=%t", got, present)
+			}
+		})
 	}
 }
 
