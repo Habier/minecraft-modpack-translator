@@ -17,6 +17,7 @@ coverage.html
 /.cache/
 /.codegraph/
 /tmp/
+/logs/
 *.log
 /openspec/
 
@@ -26,6 +27,7 @@ coverage.html
 !.env.example
 
 # Generated Minecraft output from local runs
+/modpack-translator-output/
 /resourcepacks/
 /TraduccionModpack/
 

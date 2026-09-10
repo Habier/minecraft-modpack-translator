@@ -16,6 +16,7 @@ type cliOptions struct {
 	translate   bool
 	refresh     bool
 	force       bool
+	debug       bool
 }
 
 type commandDependencies struct {
@@ -67,6 +68,7 @@ func newRootCommand(dependencies commandDependencies) *cobra.Command {
 	addRootBoolFlag(root, "translate", &options.translate, "translate catalog and write completed translations back")
 	addRootBoolFlag(root, "refresh", &options.refresh, "refresh extracted language sources")
 	addRootBoolFlag(root, "force", &options.force, "continue past safe malformed target language files")
+	addRootBoolFlag(root, "debug", &options.debug, "quarantine malformed provider response content for this invocation")
 	root.AddCommand(newModelsCommand(dependencies.getenv, dependencies.output))
 	return root
 }
